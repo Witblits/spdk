@@ -33,10 +33,8 @@
 #  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-ifneq ($(MAKECMDGOALS),clean)
 ifeq ($(wildcard $(SPDK_ROOT_DIR)/mk/config.mk),)
-$(error mk/config.mk: file not found. Please run configure before 'make $(filter-out clean,$(MAKECMDGOALS))')
-endif
+$(error mk/config.mk: file not found. Please run configure before make)
 endif
 
 include $(SPDK_ROOT_DIR)/mk/config.mk
@@ -72,19 +70,22 @@ ifneq ($(filter freebsd%,$(TARGET_TRIPLET_WORDS)),)
 OS = FreeBSD
 endif
 
+TARGET_ARCHITECTURE ?= $(CONFIG_ARCH)
 TARGET_MACHINE := $(firstword $(TARGET_TRIPLET_WORDS))
 
 COMMON_CFLAGS = -g $(C_OPT) -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wmissing-declarations -fno-strict-aliasing -I$(SPDK_ROOT_DIR)/include
 
 ifneq ($(filter powerpc%,$(TARGET_MACHINE)),)
-COMMON_CFLAGS += -mcpu=native
-endif
-ifeq ($(TARGET_MACHINE),x86_64)
-COMMON_CFLAGS += -march=native
-endif
-ifeq ($(TARGET_MACHINE),aarch64)
+COMMON_CFLAGS += -mcpu=$(TARGET_ARCHITECTURE)
+else ifeq ($(TARGET_MACHINE),aarch64)
+ifeq ($(TARGET_ARCHITECTURE),native)
 COMMON_CFLAGS += -march=armv8-a+crc
+else
+COMMON_CFLAGS += -march=$(TARGET_ARCHITECTURE)
+endif
 COMMON_CFLAGS += -DPAGE_SIZE=$(shell getconf PAGESIZE)
+else
+COMMON_CFLAGS += -march=$(TARGET_ARCHITECTURE)
 endif
 
 ifeq ($(CONFIG_WERROR), y)
@@ -135,10 +136,6 @@ endif
 ifeq ($(OS),FreeBSD)
 SYS_LIBS += -L/usr/local/lib
 COMMON_CFLAGS += -I/usr/local/include
-# Default to lld on FreeBSD
-ifeq ($(origin LD),default)
-LD = ld.lld
-endif
 endif
 
 # Attach only if PMDK lib specified with configure
@@ -219,7 +216,7 @@ COMMON_CFLAGS += -pthread
 LDFLAGS += -pthread
 
 CFLAGS   += $(COMMON_CFLAGS) -Wno-pointer-sign -Wstrict-prototypes -Wold-style-definition -std=gnu99
-CXXFLAGS += $(COMMON_CFLAGS) -std=c++0x
+CXXFLAGS += $(COMMON_CFLAGS)
 
 SYS_LIBS += -lrt
 SYS_LIBS += -luuid

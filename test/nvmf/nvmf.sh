@@ -25,22 +25,21 @@ run_test suite test/nvmf/target/nvmf_lvol.sh $TEST_ARGS
 #TODO: disabled due to intermittent failures. Need to triage.
 # run_test suite test/nvmf/target/srq_overwhelm.sh $TEST_ARGS
 run_test suite test/nvmf/target/nvmf_vhost.sh $TEST_ARGS
-run_test suite test/nvmf/target/shutdown.sh $TEST_ARGS
 run_test suite test/nvmf/target/bdev_io_wait.sh $TEST_ARGS
 run_test suite test/nvmf/target/create_transport.sh $TEST_ARGS
+run_test suite test/nvmf/target/multitarget.sh $TEST_ARGS
 
 if [ $RUN_NIGHTLY -eq 1 ]; then
 	run_test suite test/nvmf/target/fuzz.sh $TEST_ARGS
 	run_test suite test/nvmf/target/multiconnection.sh $TEST_ARGS
+	run_test suite test/nvmf/target/initiator_timeout.sh $TEST_ARGS
 fi
 
 run_test suite test/nvmf/target/nmic.sh $TEST_ARGS
 run_test suite test/nvmf/target/rpc.sh $TEST_ARGS
 run_test suite test/nvmf/target/fio.sh $TEST_ARGS
-# bdevio currently fails with tcp transport - see issue #808
-if [ "$TEST_TRANSPORT" == "rdma" ]; then
-    run_test suite test/nvmf/target/bdevio.sh $TEST_ARGS
-fi
+run_test suite test/nvmf/target/shutdown.sh $TEST_ARGS
+run_test suite test/nvmf/target/bdevio.sh $TEST_ARGS
 
 timing_enter host
 

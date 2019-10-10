@@ -1,12 +1,20 @@
-#!/usr/bin/env bash
-
 NVMF_PORT=4420
 NVMF_IP_PREFIX="192.168.100"
 NVMF_IP_LEAST_ADDR=8
 NVMF_TCP_IP_ADDRESS="127.0.0.1"
+NVMF_TRANSPORT_OPTS=""
+
+function build_nvmf_app_args()
+{
+	if [ $SPDK_RUN_NON_ROOT -eq 1 ]; then
+		echo "sudo -u $(logname) ./app/nvmf_tgt/nvmf_tgt -i $NVMF_APP_SHM_ID -e 0xFFFF"
+	else
+		echo "./app/nvmf_tgt/nvmf_tgt -i $NVMF_APP_SHM_ID -e 0xFFFF"
+	fi
+}
 
 : ${NVMF_APP_SHM_ID="0"}; export NVMF_APP_SHM_ID
-: ${NVMF_APP="./app/nvmf_tgt/nvmf_tgt -i $NVMF_APP_SHM_ID -e 0xFFFF"}; export NVMF_APP
+: ${NVMF_APP="$(build_nvmf_app_args)"}; export NVMF_APP
 
 have_pci_nics=0
 
@@ -101,13 +109,13 @@ function detect_rdma_nics()
 
 function allocate_nic_ips()
 {
-	let count=$NVMF_IP_LEAST_ADDR
+	(( count=$NVMF_IP_LEAST_ADDR ))
 	for nic_name in $(get_rdma_if_list); do
 		ip="$(get_ip_address $nic_name)"
 		if [ -z $ip ]; then
 			ip addr add $NVMF_IP_PREFIX.$count/24 dev $nic_name
 			ip link set $nic_name up
-			let count=$count+1
+			(( count=$count+1 ))
 		fi
 		# dump configuration for debug log
 		ip addr show $nic_name
@@ -142,8 +150,7 @@ function nvmfcleanup()
 	set +e
 	for i in {1..20}; do
 		modprobe -v -r nvme-$TEST_TRANSPORT
-		modprobe -v -r nvme-fabrics
-		if [ $? -eq 0 ]; then
+		if modprobe -v -r nvme-fabrics; then
 			set -e
 			return
 		fi
@@ -171,6 +178,8 @@ function nvmftestinit()
 			rdma_device_init
 		fi
 	fi
+
+	NVMF_TRANSPORT_OPTS="-t $TEST_TRANSPORT"
 	if [ "$TEST_TRANSPORT" == "rdma" ]; then
 		RDMA_IP_LIST=$(get_available_rdma_ips)
 		NVMF_FIRST_TARGET_IP=$(echo "$RDMA_IP_LIST" | head -n 1)
@@ -180,6 +189,7 @@ function nvmftestinit()
 		fi
 	elif [ "$TEST_TRANSPORT" == "tcp" ]; then
 		NVMF_FIRST_TARGET_IP=127.0.0.1
+		NVMF_TRANSPORT_OPTS="$NVMF_TRANSPORT_OPTS -o"
 	fi
 
 	# currently we run the host/perf test for TCP even on systems without kernel nvme-tcp
@@ -195,7 +205,7 @@ function nvmfappstart()
 	timing_enter start_nvmf_tgt
 	$NVMF_APP $1 &
 	nvmfpid=$!
-	trap "process_shm --id $NVMF_APP_SHM_ID; nvmftestfini; exit 1" SIGINT SIGTERM EXIT
+	trap 'process_shm --id $NVMF_APP_SHM_ID; nvmftestfini; exit 1' SIGINT SIGTERM EXIT
 	waitforlisten $nvmfpid
 	timing_exit start_nvmf_tgt
 }
@@ -235,7 +245,7 @@ function check_ip_is_soft_roce()
 	IP=$1
 	if hash rxe_cfg; then
 		dev=$(ip -4 -o addr show | grep $IP | cut -d" " -f2)
-		if [ -z $(rxe_cfg | grep $dev | awk '{print $4}') ]; then
+		if [ -z $(rxe_cfg | grep $dev | awk '{print $4}' | grep "rxe") ]; then
 			return 1
 		else
 			return 0
@@ -249,8 +259,7 @@ function nvme_connect()
 {
 	local init_count=$(nvme list | wc -l)
 
-	nvme connect $@
-	if [ $? != 0 ]; then return $?; fi
+	if ! nvme connect $@; then return $?; fi
 
 	for i in $(seq 1 10); do
 		if [ $(nvme list | wc -l) -gt $init_count ]; then

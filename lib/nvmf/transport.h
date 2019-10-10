@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -167,6 +167,17 @@ struct spdk_nvmf_transport_ops {
 	 * set the submission queue size of the queue pair
 	 */
 	int (*qpair_set_sqsize)(struct spdk_nvmf_qpair *qpair);
+
+	/*
+	 * Get transport poll group statistics
+	 */
+	int (*poll_group_get_stat)(struct spdk_nvmf_tgt *tgt,
+				   struct spdk_nvmf_transport_poll_group_stat **stat);
+
+	/*
+	 * Free transport poll group statistics previously allocated with poll_group_get_stat()
+	 */
+	void (*poll_group_free_stat)(struct spdk_nvmf_transport_poll_group_stat *stat);
 };
 
 int spdk_nvmf_transport_stop_listen(struct spdk_nvmf_transport *transport,
@@ -214,5 +225,6 @@ bool spdk_nvmf_transport_opts_init(enum spdk_nvme_transport_type type,
 
 extern const struct spdk_nvmf_transport_ops spdk_nvmf_transport_rdma;
 extern const struct spdk_nvmf_transport_ops spdk_nvmf_transport_tcp;
+extern const struct spdk_nvmf_transport_ops spdk_nvmf_transport_fc;
 
 #endif /* SPDK_NVMF_TRANSPORT_H */

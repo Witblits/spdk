@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -51,6 +51,8 @@
 #include "spdk/bdev_module.h"
 #include "spdk_internal/log.h"
 #include "spdk/string.h"
+
+#include "bdev_internal.h"
 
 #ifdef SPDK_CONFIG_VTUNE
 #include "ittnotify.h"
@@ -106,6 +108,8 @@ struct spdk_bdev_mgr {
 	bool init_complete;
 	bool module_init_complete;
 
+	pthread_mutex_t mutex;
+
 #ifdef SPDK_CONFIG_VTUNE
 	__itt_domain	*domain;
 #endif
@@ -116,7 +120,9 @@ static struct spdk_bdev_mgr g_bdev_mgr = {
 	.bdevs = TAILQ_HEAD_INITIALIZER(g_bdev_mgr.bdevs),
 	.init_complete = false,
 	.module_init_complete = false,
+	.mutex = PTHREAD_MUTEX_INITIALIZER,
 };
+
 
 static struct spdk_bdev_opts	g_bdev_opts = {
 	.bdev_io_pool_size = SPDK_BDEV_IO_POOL_SIZE,
@@ -269,11 +275,18 @@ struct spdk_bdev_channel {
 struct spdk_bdev_desc {
 	struct spdk_bdev		*bdev;
 	struct spdk_thread		*thread;
-	spdk_bdev_remove_cb_t		remove_cb;
-	void				*remove_ctx;
-	bool				remove_scheduled;
+	struct {
+		bool open_with_ext;
+		union {
+			spdk_bdev_remove_cb_t remove_fn;
+			spdk_bdev_event_cb_t event_fn;
+		};
+		void *ctx;
+	}				callback;
 	bool				closed;
 	bool				write;
+	pthread_mutex_t			mutex;
+	uint32_t			refs;
 	TAILQ_ENTRY(spdk_bdev_desc)	link;
 };
 
@@ -749,7 +762,7 @@ spdk_bdev_qos_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 	spdk_bdev_get_qos_rate_limits(bdev, limits);
 
 	spdk_json_write_object_begin(w);
-	spdk_json_write_named_string(w, "method", "set_bdev_qos_limit");
+	spdk_json_write_named_string(w, "method", "bdev_set_qos_limit");
 
 	spdk_json_write_named_object_begin(w, "params");
 	spdk_json_write_named_string(w, "name", bdev->name);
@@ -774,7 +787,7 @@ spdk_bdev_subsystem_config_json(struct spdk_json_write_ctx *w)
 	spdk_json_write_array_begin(w);
 
 	spdk_json_write_object_begin(w);
-	spdk_json_write_named_string(w, "method", "set_bdev_options");
+	spdk_json_write_named_string(w, "method", "bdev_set_options");
 	spdk_json_write_named_object_begin(w, "params");
 	spdk_json_write_named_uint32(w, "bdev_io_pool_size", g_bdev_opts.bdev_io_pool_size);
 	spdk_json_write_named_uint32(w, "bdev_io_cache_size", g_bdev_opts.bdev_io_cache_size);
@@ -787,6 +800,8 @@ spdk_bdev_subsystem_config_json(struct spdk_json_write_ctx *w)
 		}
 	}
 
+	pthread_mutex_lock(&g_bdev_mgr.mutex);
+
 	TAILQ_FOREACH(bdev, &g_bdev_mgr.bdevs, internal.link) {
 		if (bdev->fn_table->write_config_json) {
 			bdev->fn_table->write_config_json(bdev, w);
@@ -794,6 +809,8 @@ spdk_bdev_subsystem_config_json(struct spdk_json_write_ctx *w)
 
 		spdk_bdev_qos_config_json(bdev, w);
 	}
+
+	pthread_mutex_unlock(&g_bdev_mgr.mutex);
 
 	spdk_json_write_array_end(w);
 }
@@ -932,6 +949,15 @@ spdk_bdev_module_examine_done(struct spdk_bdev_module *module)
 /** The last initialized bdev module */
 static struct spdk_bdev_module *g_resume_bdev_module = NULL;
 
+static void
+spdk_bdev_init_failed(void *cb_arg)
+{
+	struct spdk_bdev_module *module = cb_arg;
+
+	module->internal.action_in_progress--;
+	spdk_bdev_init_complete(-1);
+}
+
 static int
 spdk_bdev_modules_init(void)
 {
@@ -945,18 +971,16 @@ spdk_bdev_modules_init(void)
 		}
 		rc = module->module_init();
 		if (rc != 0) {
+			/* Bump action_in_progress to prevent other modules from completion of modules_init
+			 * Send message to defer application shutdown until resources are cleaned up */
+			module->internal.action_in_progress = 1;
+			spdk_thread_send_msg(spdk_get_thread(), spdk_bdev_init_failed, module);
 			return rc;
 		}
 	}
 
 	g_resume_bdev_module = NULL;
 	return 0;
-}
-
-static void
-spdk_bdev_init_failed(void *cb_arg)
-{
-	spdk_bdev_init_complete(-1);
 }
 
 void
@@ -1070,7 +1094,6 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 	g_bdev_mgr.module_init_complete = true;
 	if (rc != 0) {
 		SPDK_ERRLOG("bdev modules init failed\n");
-		spdk_thread_send_msg(spdk_get_thread(), spdk_bdev_init_failed, NULL);
 		return;
 	}
 
@@ -1112,12 +1135,23 @@ spdk_bdev_mgr_unregister_cb(void *io_device)
 	g_fini_cb_arg = NULL;
 	g_bdev_mgr.init_complete = false;
 	g_bdev_mgr.module_init_complete = false;
+	pthread_mutex_destroy(&g_bdev_mgr.mutex);
 }
 
 static void
 spdk_bdev_module_finish_iter(void *arg)
 {
 	struct spdk_bdev_module *bdev_module;
+
+	/* FIXME: Handling initialization failures is broken now,
+	 * so we won't even try cleaning up after successfully
+	 * initialized modules. if module_init_complete is false,
+	 * just call spdk_bdev_mgr_unregister_cb
+	 */
+	if (!g_bdev_mgr.module_init_complete) {
+		spdk_bdev_mgr_unregister_cb(NULL);
+		return;
+	}
 
 	/* Start iterating from the last touched module */
 	if (!g_resume_bdev_module) {
@@ -1220,7 +1254,7 @@ _spdk_bdev_finish_unregister_bdevs_iter(void *cb_arg, int bdeverrno)
 	 */
 	for (bdev = TAILQ_LAST(&g_bdev_mgr.bdevs, spdk_bdev_list);
 	     bdev; bdev = TAILQ_PREV(bdev, spdk_bdev_list, internal.link)) {
-		SPDK_ERRLOG("Unregistering claimed bdev '%s'!\n", bdev->name);
+		SPDK_WARNLOG("Unregistering claimed bdev '%s'!\n", bdev->name);
 		spdk_bdev_unregister(bdev, _spdk_bdev_finish_unregister_bdevs_iter, bdev);
 		return;
 	}
@@ -1247,7 +1281,7 @@ spdk_bdev_finish(spdk_bdev_fini_cb cb_fn, void *cb_arg)
 	_spdk_bdev_finish_unregister_bdevs_iter(NULL, 0);
 }
 
-static struct spdk_bdev_io *
+struct spdk_bdev_io *
 spdk_bdev_get_io(struct spdk_bdev_channel *channel)
 {
 	struct spdk_bdev_mgmt_channel *ch = channel->shared_resource->mgmt_ch;
@@ -1824,7 +1858,7 @@ _spdk_bdev_io_submit(void *ctx)
 	bdev_io->internal.in_submit_request = false;
 }
 
-static void
+void
 spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 {
 	struct spdk_bdev *bdev = bdev_io->bdev;
@@ -1865,7 +1899,7 @@ spdk_bdev_io_submit_reset(struct spdk_bdev_io *bdev_io)
 	bdev_io->internal.in_submit_request = false;
 }
 
-static void
+void
 spdk_bdev_io_init(struct spdk_bdev_io *bdev_io,
 		  struct spdk_bdev *bdev, void *cb_arg,
 		  spdk_bdev_io_completion_cb cb)
@@ -2406,6 +2440,12 @@ spdk_bdev_get_block_size(const struct spdk_bdev *bdev)
 	return bdev->blocklen;
 }
 
+uint32_t
+spdk_bdev_get_write_unit_size(const struct spdk_bdev *bdev)
+{
+	return bdev->write_unit_size;
+}
+
 uint64_t
 spdk_bdev_get_num_blocks(const struct spdk_bdev *bdev)
 {
@@ -2481,6 +2521,12 @@ bool
 spdk_bdev_is_md_separate(const struct spdk_bdev *bdev)
 {
 	return (bdev->md_len != 0) && !bdev->md_interleave;
+}
+
+bool
+spdk_bdev_is_zoned(const struct spdk_bdev *bdev)
+{
+	return bdev->zoned;
 }
 
 uint32_t
@@ -2616,9 +2662,42 @@ spdk_bdev_set_qd_sampling_period(struct spdk_bdev *bdev, uint64_t period)
 	}
 }
 
+static void
+_spdk_bdev_desc_free(struct spdk_bdev_desc *desc)
+{
+	pthread_mutex_destroy(&desc->mutex);
+	free(desc);
+}
+
+static void
+_resize_notify(void *arg)
+{
+	struct spdk_bdev_desc *desc = arg;
+
+	pthread_mutex_lock(&desc->mutex);
+	desc->refs--;
+	if (!desc->closed) {
+		pthread_mutex_unlock(&desc->mutex);
+		desc->callback.event_fn(SPDK_BDEV_EVENT_RESIZE,
+					desc->bdev,
+					desc->callback.ctx);
+		return;
+	} else if (0 == desc->refs) {
+		/* This descriptor was closed after this resize_notify message was sent.
+		 * spdk_bdev_close() could not free the descriptor since this message was
+		 * in flight, so we free it now using _spdk_bdev_desc_free().
+		 */
+		pthread_mutex_unlock(&desc->mutex);
+		_spdk_bdev_desc_free(desc);
+		return;
+	}
+	pthread_mutex_unlock(&desc->mutex);
+}
+
 int
 spdk_bdev_notify_blockcnt_change(struct spdk_bdev *bdev, uint64_t size)
 {
+	struct spdk_bdev_desc *desc;
 	int ret;
 
 	pthread_mutex_lock(&bdev->internal.mutex);
@@ -2629,6 +2708,14 @@ spdk_bdev_notify_blockcnt_change(struct spdk_bdev *bdev, uint64_t size)
 		ret = -EBUSY;
 	} else {
 		bdev->blockcnt = size;
+		TAILQ_FOREACH(desc, &bdev->internal.open_descs, link) {
+			pthread_mutex_lock(&desc->mutex);
+			if (desc->callback.open_with_ext && !desc->closed) {
+				desc->refs++;
+				spdk_thread_send_msg(desc->thread, _resize_notify, desc);
+			}
+			pthread_mutex_unlock(&desc->mutex);
+		}
 		ret = 0;
 	}
 
@@ -4042,6 +4129,11 @@ spdk_bdev_init(struct spdk_bdev *bdev)
 		}
 	}
 
+	/* If the user didn't specify a write unit size, set it to one. */
+	if (bdev->write_unit_size == 0) {
+		bdev->write_unit_size = 1;
+	}
+
 	TAILQ_INIT(&bdev->internal.open_descs);
 
 	TAILQ_INIT(&bdev->aliases);
@@ -4164,13 +4256,27 @@ _remove_notify(void *arg)
 {
 	struct spdk_bdev_desc *desc = arg;
 
-	desc->remove_scheduled = false;
+	pthread_mutex_lock(&desc->mutex);
+	desc->refs--;
 
-	if (desc->closed) {
-		free(desc);
-	} else {
-		desc->remove_cb(desc->remove_ctx);
+	if (!desc->closed) {
+		pthread_mutex_unlock(&desc->mutex);
+		if (desc->callback.open_with_ext) {
+			desc->callback.event_fn(SPDK_BDEV_EVENT_REMOVE, desc->bdev, desc->callback.ctx);
+		} else {
+			desc->callback.remove_fn(desc->callback.ctx);
+		}
+		return;
+	} else if (0 == desc->refs) {
+		/* This descriptor was closed after this remove_notify message was sent.
+		 * spdk_bdev_close() could not free the descriptor since this message was
+		 * in flight, so we free it now using _spdk_bdev_desc_free().
+		 */
+		pthread_mutex_unlock(&desc->mutex);
+		_spdk_bdev_desc_free(desc);
+		return;
 	}
+	pthread_mutex_unlock(&desc->mutex);
 }
 
 /* Must be called while holding bdev->internal.mutex.
@@ -4185,19 +4291,16 @@ spdk_bdev_unregister_unsafe(struct spdk_bdev *bdev)
 	/* Notify each descriptor about hotremoval */
 	TAILQ_FOREACH_SAFE(desc, &bdev->internal.open_descs, link, tmp) {
 		rc = -EBUSY;
-		if (desc->remove_cb) {
-			/*
-			 * Defer invocation of the remove_cb to a separate message that will
-			 *  run later on its thread.  This ensures this context unwinds and
-			 *  we don't recursively unregister this bdev again if the remove_cb
-			 *  immediately closes its descriptor.
-			 */
-			if (!desc->remove_scheduled) {
-				/* Avoid scheduling removal of the same descriptor multiple times. */
-				desc->remove_scheduled = true;
-				spdk_thread_send_msg(desc->thread, _remove_notify, desc);
-			}
-		}
+		pthread_mutex_lock(&desc->mutex);
+		/*
+		 * Defer invocation of the event_cb to a separate message that will
+		 *  run later on its thread.  This ensures this context unwinds and
+		 *  we don't recursively unregister this bdev again if the event_cb
+		 *  immediately closes its descriptor.
+		 */
+		desc->refs++;
+		spdk_thread_send_msg(desc->thread, _remove_notify, desc);
+		pthread_mutex_unlock(&desc->mutex);
 	}
 
 	/* If there are no descriptors, proceed removing the bdev */
@@ -4227,9 +4330,11 @@ spdk_bdev_unregister(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void
 		return;
 	}
 
+	pthread_mutex_lock(&g_bdev_mgr.mutex);
 	pthread_mutex_lock(&bdev->internal.mutex);
 	if (bdev->internal.status == SPDK_BDEV_STATUS_REMOVING) {
 		pthread_mutex_unlock(&bdev->internal.mutex);
+		pthread_mutex_unlock(&g_bdev_mgr.mutex);
 		if (cb_fn) {
 			cb_fn(cb_arg, -EBUSY);
 		}
@@ -4243,17 +4348,22 @@ spdk_bdev_unregister(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void
 	/* Call under lock. */
 	rc = spdk_bdev_unregister_unsafe(bdev);
 	pthread_mutex_unlock(&bdev->internal.mutex);
+	pthread_mutex_unlock(&g_bdev_mgr.mutex);
 
 	if (rc == 0) {
 		spdk_bdev_fini(bdev);
 	}
 }
 
-int
-spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_cb,
-	       void *remove_ctx, struct spdk_bdev_desc **_desc)
+static void
+_spdk_bdev_dummy_event_cb(void *remove_ctx)
 {
-	struct spdk_bdev_desc *desc;
+	SPDK_DEBUGLOG(SPDK_LOG_BDEV, "Bdev remove event received with no remove callback specified");
+}
+
+static int
+_spdk_bdev_open(struct spdk_bdev *bdev, bool write, struct spdk_bdev_desc *desc)
+{
 	struct spdk_thread *thread;
 	struct set_qos_limit_ctx *ctx;
 
@@ -4263,30 +4373,23 @@ spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_
 		return -ENOTSUP;
 	}
 
-	desc = calloc(1, sizeof(*desc));
-	if (desc == NULL) {
-		SPDK_ERRLOG("Failed to allocate memory for bdev descriptor\n");
-		return -ENOMEM;
-	}
-
 	SPDK_DEBUGLOG(SPDK_LOG_BDEV, "Opening descriptor %p for bdev %s on thread %p\n", desc, bdev->name,
 		      spdk_get_thread());
 
 	desc->bdev = bdev;
 	desc->thread = thread;
-	desc->remove_cb = remove_cb;
-	desc->remove_ctx = remove_ctx;
 	desc->write = write;
-	*_desc = desc;
 
 	pthread_mutex_lock(&bdev->internal.mutex);
+	if (bdev->internal.status == SPDK_BDEV_STATUS_REMOVING) {
+		pthread_mutex_unlock(&bdev->internal.mutex);
+		return -ENODEV;
+	}
 
 	if (write && bdev->internal.claim_module) {
 		SPDK_ERRLOG("Could not open %s - %s module already claimed it\n",
 			    bdev->name, bdev->internal.claim_module->name);
 		pthread_mutex_unlock(&bdev->internal.mutex);
-		free(desc);
-		*_desc = NULL;
 		return -EPERM;
 	}
 
@@ -4296,8 +4399,6 @@ spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_
 		if (ctx == NULL) {
 			SPDK_ERRLOG("Failed to allocate memory for QoS context\n");
 			pthread_mutex_unlock(&bdev->internal.mutex);
-			free(desc);
-			*_desc = NULL;
 			return -ENOMEM;
 		}
 		ctx->bdev = bdev;
@@ -4313,6 +4414,91 @@ spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_
 	return 0;
 }
 
+int
+spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_cb,
+	       void *remove_ctx, struct spdk_bdev_desc **_desc)
+{
+	struct spdk_bdev_desc *desc;
+	int rc;
+
+	desc = calloc(1, sizeof(*desc));
+	if (desc == NULL) {
+		SPDK_ERRLOG("Failed to allocate memory for bdev descriptor\n");
+		return -ENOMEM;
+	}
+
+	if (remove_cb == NULL) {
+		remove_cb = _spdk_bdev_dummy_event_cb;
+	}
+
+	desc->callback.open_with_ext = false;
+	desc->callback.remove_fn = remove_cb;
+	desc->callback.ctx = remove_ctx;
+	pthread_mutex_init(&desc->mutex, NULL);
+
+	pthread_mutex_lock(&g_bdev_mgr.mutex);
+
+	rc = _spdk_bdev_open(bdev, write, desc);
+	if (rc != 0) {
+		_spdk_bdev_desc_free(desc);
+		desc = NULL;
+	}
+
+	*_desc = desc;
+
+	pthread_mutex_unlock(&g_bdev_mgr.mutex);
+
+	return rc;
+}
+
+int
+spdk_bdev_open_ext(const char *bdev_name, bool write, spdk_bdev_event_cb_t event_cb,
+		   void *event_ctx, struct spdk_bdev_desc **_desc)
+{
+	struct spdk_bdev_desc *desc;
+	struct spdk_bdev *bdev;
+	int rc;
+
+	if (event_cb == NULL) {
+		SPDK_ERRLOG("Missing event callback function\n");
+		return -EINVAL;
+	}
+
+	pthread_mutex_lock(&g_bdev_mgr.mutex);
+
+	bdev = spdk_bdev_get_by_name(bdev_name);
+
+	if (bdev == NULL) {
+		SPDK_ERRLOG("Failed to find bdev with name: %s\n", bdev_name);
+		pthread_mutex_unlock(&g_bdev_mgr.mutex);
+		return -EINVAL;
+	}
+
+	desc = calloc(1, sizeof(*desc));
+	if (desc == NULL) {
+		SPDK_ERRLOG("Failed to allocate memory for bdev descriptor\n");
+		pthread_mutex_unlock(&g_bdev_mgr.mutex);
+		return -ENOMEM;
+	}
+
+	desc->callback.open_with_ext = true;
+	desc->callback.event_fn = event_cb;
+	desc->callback.ctx = event_ctx;
+	pthread_mutex_init(&desc->mutex, NULL);
+
+	rc = _spdk_bdev_open(bdev, write, desc);
+	if (rc != 0) {
+		_spdk_bdev_desc_free(desc);
+		desc = NULL;
+	}
+
+	*_desc = desc;
+
+	pthread_mutex_unlock(&g_bdev_mgr.mutex);
+
+	return rc;
+}
+
 void
 spdk_bdev_close(struct spdk_bdev_desc *desc)
 {
@@ -4322,19 +4508,20 @@ spdk_bdev_close(struct spdk_bdev_desc *desc)
 	SPDK_DEBUGLOG(SPDK_LOG_BDEV, "Closing descriptor %p for bdev %s on thread %p\n", desc, bdev->name,
 		      spdk_get_thread());
 
-	if (desc->thread != spdk_get_thread()) {
-		SPDK_ERRLOG("Descriptor %p for bdev %s closed on wrong thread (%p, expected %p)\n",
-			    desc, bdev->name, spdk_get_thread(), desc->thread);
-	}
+	assert(desc->thread == spdk_get_thread());
 
 	pthread_mutex_lock(&bdev->internal.mutex);
+	pthread_mutex_lock(&desc->mutex);
 
 	TAILQ_REMOVE(&bdev->internal.open_descs, desc, link);
 
 	desc->closed = true;
 
-	if (!desc->remove_scheduled) {
-		free(desc);
+	if (0 == desc->refs) {
+		pthread_mutex_unlock(&desc->mutex);
+		_spdk_bdev_desc_free(desc);
+	} else {
+		pthread_mutex_unlock(&desc->mutex);
 	}
 
 	/* If no more descriptors, kill QoS channel */
@@ -4748,8 +4935,7 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 			if (!bdev->internal.qos) {
 				pthread_mutex_unlock(&bdev->internal.mutex);
 				SPDK_ERRLOG("Unable to allocate memory for QoS tracking\n");
-				free(ctx);
-				cb_fn(cb_arg, -ENOMEM);
+				_spdk_bdev_set_qos_limit_done(ctx, -ENOMEM);
 				return;
 			}
 		}

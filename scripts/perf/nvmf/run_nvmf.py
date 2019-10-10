@@ -466,7 +466,7 @@ class SPDKTarget(Target):
         # Create RDMA transport layer
         rpc.nvmf.nvmf_create_transport(self.client, trtype=self.transport, num_shared_buffers=self.num_shared_buffers)
         self.log_print("SPDK NVMeOF transport layer:")
-        rpc.client.print_dict(rpc.nvmf.get_nvmf_transports(self.client))
+        rpc.client.print_dict(rpc.nvmf.nvmf_get_transports(self.client))
 
         if self.null_block:
             nvme_section = self.spdk_tgt_add_nullblock()
@@ -478,9 +478,9 @@ class SPDKTarget(Target):
 
     def spdk_tgt_add_nullblock(self):
         self.log_print("Adding null block bdev to config via RPC")
-        rpc.bdev.construct_null_bdev(self.client, 102400, 4096, "Nvme0n1")
+        rpc.bdev.bdev_null_create(self.client, 102400, 4096, "Nvme0n1")
         self.log_print("SPDK Bdevs configuration:")
-        rpc.client.print_dict(rpc.bdev.get_bdevs(self.client))
+        rpc.client.print_dict(rpc.bdev.bdev_get_bdevs(self.client))
 
     def spdk_tgt_add_nvme_conf(self, req_num_disks=None):
         self.log_print("Adding NVMe bdevs to config via RPC")
@@ -496,10 +496,10 @@ class SPDKTarget(Target):
                 bdfs = bdfs[0:req_num_disks]
 
         for i, bdf in enumerate(bdfs):
-            rpc.bdev.construct_nvme_bdev(self.client, name="Nvme%s" % i, trtype="PCIe", traddr=bdf)
+            rpc.bdev.bdev_nvme_attach_controller(self.client, name="Nvme%s" % i, trtype="PCIe", traddr=bdf)
 
         self.log_print("SPDK Bdevs configuration:")
-        rpc.client.print_dict(rpc.bdev.get_bdevs(self.client))
+        rpc.client.print_dict(rpc.bdev.bdev_get_bdevs(self.client))
 
     def spdk_tgt_add_subsystem_conf(self, ips=None, req_num_disks=None):
         self.log_print("Adding subsystems to config")
@@ -517,7 +517,7 @@ class SPDKTarget(Target):
                 nqn = "nqn.2018-09.io.spdk:cnode%s" % c
                 serial = "SPDK00%s" % c
                 bdev_name = "Nvme%sn1" % (c - 1)
-                rpc.nvmf.nvmf_subsystem_create(self.client, nqn, serial,
+                rpc.nvmf.nvmf_create_subsystem(self.client, nqn, serial,
                                                allow_any_host=True, max_namespaces=8)
                 rpc.nvmf.nvmf_subsystem_add_ns(self.client, nqn, bdev_name)
 
@@ -528,7 +528,7 @@ class SPDKTarget(Target):
                                                      adrfam="ipv4")
 
         self.log_print("SPDK NVMeOF subsystem configuration:")
-        rpc.client.print_dict(rpc.nvmf.get_nvmf_subsystems(self.client))
+        rpc.client.print_dict(rpc.nvmf.nvmf_get_subsystems(self.client))
 
     def tgt_start(self):
         self.subsys_no = get_nvme_devices_count()

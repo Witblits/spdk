@@ -46,6 +46,8 @@
  */
 #define DPDK_HOTPLUG_RETRY_COUNT 4
 
+/* DPDK alarm/interrupt thread */
+static pthread_t g_dpdk_tid;
 static pthread_mutex_t g_pci_mutex = PTHREAD_MUTEX_INITIALIZER;
 static TAILQ_HEAD(, spdk_pci_device) g_pci_devices = TAILQ_HEAD_INITIALIZER(g_pci_devices);
 /* devices hotplugged on a dpdk thread */
@@ -121,14 +123,49 @@ spdk_detach_rte_cb(void *_dev)
 static void
 spdk_detach_rte(struct spdk_pci_device *dev)
 {
+	struct rte_pci_device *rte_dev = dev->dev_handle;
+	int i;
+	bool removed;
+
 	/* The device was already marked as available and could be attached
 	 * again while we go asynchronous, so we explicitly forbid that.
 	 */
 	dev->internal.pending_removal = true;
-	if (spdk_process_is_primary()) {
-		rte_eal_alarm_set(10, spdk_detach_rte_cb, dev->dev_handle);
+	if (spdk_process_is_primary() && !pthread_equal(g_dpdk_tid, pthread_self())) {
+		rte_eal_alarm_set(1, spdk_detach_rte_cb, rte_dev);
+		/* wait up to 20ms for the cb to start executing */
+		for (i = 20; i > 0; i--) {
+
+			spdk_delay_us(1000);
+			pthread_mutex_lock(&g_pci_mutex);
+			removed = dev->internal.removed;
+			pthread_mutex_unlock(&g_pci_mutex);
+
+			if (removed) {
+				break;
+			}
+		}
+
+		/* besides checking the removed flag, we also need to wait
+		 * for the dpdk detach function to unwind, as it's doing some
+		 * operations even after calling our detach callback. Simply
+		 * cancell the alarm - if it started executing already, this
+		 * call will block and wait for it to finish.
+		 */
+		rte_eal_alarm_cancel(spdk_detach_rte_cb, rte_dev);
+
+		/* the device could have been finally removed, so just check
+		 * it again.
+		 */
+		pthread_mutex_lock(&g_pci_mutex);
+		removed = dev->internal.removed;
+		pthread_mutex_unlock(&g_pci_mutex);
+		if (!removed) {
+			fprintf(stderr, "Timeout waiting for DPDK to remove PCI device %s.\n",
+				rte_dev->name);
+		}
 	} else {
-		spdk_detach_rte_cb(dev->dev_handle);
+		spdk_detach_rte_cb(rte_dev);
 	}
 }
 
@@ -198,6 +235,12 @@ cleanup_pci_devices(void)
 	pthread_mutex_unlock(&g_pci_mutex);
 }
 
+static void
+_get_alarm_thread_cb(void *unused)
+{
+	g_dpdk_tid = pthread_self();
+}
+
 void
 spdk_pci_init(void)
 {
@@ -230,6 +273,11 @@ spdk_pci_init(void)
 		rte_dev_event_callback_register(NULL, spdk_pci_device_rte_hotremove, NULL);
 	}
 #endif
+
+	rte_eal_alarm_set(1, _get_alarm_thread_cb, NULL);
+	/* alarms are executed in order, so this one will be always executed
+	 * before any real hotremove alarms and we don't need to wait for it.
+	 */
 }
 
 void
@@ -294,6 +342,7 @@ spdk_pci_device_init(struct rte_pci_driver *_drv,
 	dev->detach = spdk_detach_rte;
 
 	dev->internal.driver = driver;
+	dev->internal.claim_fd = -1;
 
 	if (driver->cb_fn != NULL) {
 		rc = driver->cb_fn(driver->cb_arg, dev);
@@ -339,6 +388,11 @@ void
 spdk_pci_device_detach(struct spdk_pci_device *dev)
 {
 	assert(dev->internal.attached);
+
+	if (dev->internal.claim_fd >= 0) {
+		spdk_pci_device_unclaim(dev);
+	}
+
 	dev->internal.attached = false;
 	dev->detach(dev);
 
@@ -680,7 +734,7 @@ spdk_pci_addr_compare(const struct spdk_pci_addr *a1, const struct spdk_pci_addr
 
 #ifdef __linux__
 int
-spdk_pci_device_claim(const struct spdk_pci_addr *pci_addr)
+spdk_pci_device_claim(struct spdk_pci_device *dev)
 {
 	int dev_fd;
 	char dev_name[64];
@@ -693,20 +747,19 @@ spdk_pci_device_claim(const struct spdk_pci_addr *pci_addr)
 		.l_len = 0,
 	};
 
-	snprintf(dev_name, sizeof(dev_name), "/tmp/spdk_pci_lock_%04x:%02x:%02x.%x", pci_addr->domain,
-		 pci_addr->bus,
-		 pci_addr->dev, pci_addr->func);
+	snprintf(dev_name, sizeof(dev_name), "/tmp/spdk_pci_lock_%04x:%02x:%02x.%x",
+		 dev->addr.domain, dev->addr.bus, dev->addr.dev, dev->addr.func);
 
 	dev_fd = open(dev_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
 	if (dev_fd == -1) {
 		fprintf(stderr, "could not open %s\n", dev_name);
-		return -1;
+		return -errno;
 	}
 
 	if (ftruncate(dev_fd, sizeof(int)) != 0) {
 		fprintf(stderr, "could not truncate %s\n", dev_name);
 		close(dev_fd);
-		return -1;
+		return -errno;
 	}
 
 	dev_map = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE,
@@ -714,7 +767,7 @@ spdk_pci_device_claim(const struct spdk_pci_addr *pci_addr)
 	if (dev_map == MAP_FAILED) {
 		fprintf(stderr, "could not mmap dev %s (%d)\n", dev_name, errno);
 		close(dev_fd);
-		return -1;
+		return -errno;
 	}
 
 	if (fcntl(dev_fd, F_SETLK, &pcidev_lock) != 0) {
@@ -723,22 +776,43 @@ spdk_pci_device_claim(const struct spdk_pci_addr *pci_addr)
 			" process %d has claimed it\n", dev_name, pid);
 		munmap(dev_map, sizeof(int));
 		close(dev_fd);
-		return -1;
+		/* F_SETLK returns unspecified errnos, normalize them */
+		return -EACCES;
 	}
 
 	*(int *)dev_map = (int)getpid();
 	munmap(dev_map, sizeof(int));
+	dev->internal.claim_fd = dev_fd;
 	/* Keep dev_fd open to maintain the lock. */
-	return dev_fd;
+	return 0;
+}
+
+void
+spdk_pci_device_unclaim(struct spdk_pci_device *dev)
+{
+	char dev_name[64];
+
+	snprintf(dev_name, sizeof(dev_name), "/tmp/spdk_pci_lock_%04x:%02x:%02x.%x",
+		 dev->addr.domain, dev->addr.bus, dev->addr.dev, dev->addr.func);
+
+	close(dev->internal.claim_fd);
+	dev->internal.claim_fd = -1;
+	unlink(dev_name);
 }
 #endif /* __linux__ */
 
 #ifdef __FreeBSD__
 int
-spdk_pci_device_claim(const struct spdk_pci_addr *pci_addr)
+spdk_pci_device_claim(struct spdk_pci_device *dev)
 {
 	/* TODO */
 	return 0;
+}
+
+void
+spdk_pci_device_unclaim(struct spdk_pci_device *dev)
+{
+	/* TODO */
 }
 #endif /* __FreeBSD__ */
 

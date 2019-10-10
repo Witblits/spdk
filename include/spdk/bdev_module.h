@@ -43,6 +43,7 @@
 #include "spdk/stdinc.h"
 
 #include "spdk/bdev.h"
+#include "spdk/bdev_zone.h"
 #include "spdk/queue.h"
 #include "spdk/scsi_spec.h"
 #include "spdk/thread.h"
@@ -265,6 +266,9 @@ struct spdk_bdev {
 	/** Number of blocks */
 	uint64_t blockcnt;
 
+	/** Number of blocks required for write */
+	uint32_t write_unit_size;
+
 	/**
 	 * Specifies an alignment requirement for data buffers associated with an spdk_bdev_io.
 	 * 0 = no alignment requirement
@@ -330,6 +334,26 @@ struct spdk_bdev {
 	 * Specify whether each DIF check type is enabled.
 	 */
 	uint32_t dif_check_flags;
+
+	/**
+	 * Specify whether bdev is zoned device.
+	 */
+	bool zoned;
+
+	/**
+	 * Default size of each zone (in blocks).
+	 */
+	uint64_t zone_size;
+
+	/**
+	 * Maximum number of open zones.
+	 */
+	uint32_t max_open_zones;
+
+	/**
+	 * Optimal number of open zones.
+	 */
+	uint32_t optimal_open_zones;
 
 	/**
 	 * Pointer to the bdev module that registered this bdev.
@@ -489,6 +513,19 @@ struct spdk_bdev_io {
 			/* meta data buffer size to transfer */
 			size_t md_len;
 		} nvme_passthru;
+		struct {
+			/* First logical block of a zone */
+			uint64_t zone_id;
+
+			/* Number of zones */
+			uint32_t num_zones;
+
+			/* Used to change zoned device zone state */
+			enum spdk_bdev_zone_action zone_action;
+
+			/* The data buffer */
+			void *buf;
+		} zone_mgmt;
 	} u;
 
 	/** It may be used by modules to put the bdev_io into its own list. */
@@ -875,6 +912,15 @@ struct spdk_bdev_part_base;
  * \return A pointer to the base's spdk_bdev struct.
  */
 struct spdk_bdev *spdk_bdev_part_base_get_bdev(struct spdk_bdev_part_base *part_base);
+
+/**
+ * Returns a spdk_bdev name of the corresponding spdk_bdev_part_base
+ *
+ * \param part_base A pointer to an spdk_bdev_part_base object.
+ *
+ * \return A text string representing the name of the base bdev.
+ */
+const char *spdk_bdev_part_base_get_bdev_name(struct spdk_bdev_part_base *part_base);
 
 /**
  * Returns a pointer to the spdk_bdev_descriptor associated with an spdk_bdev_part_base

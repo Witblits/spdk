@@ -190,7 +190,6 @@ static int g_latency_sw_tracking_level = 0;
 static bool g_vmd = false;
 
 static struct ctrlr_entry *g_controllers = NULL;
-static int g_controllers_found = 0;
 static struct ns_entry *g_namespaces = NULL;
 static int g_num_namespaces = 0;
 static struct worker_thread *g_workers = NULL;
@@ -218,6 +217,7 @@ static bool g_no_pci;
 static bool g_warn;
 static bool g_header_digest;
 static bool g_data_digest;
+static bool g_no_shn_notification = false;
 static uint32_t g_keep_alive_timeout_in_ms = 0;
 
 static const char *g_core_mask;
@@ -727,6 +727,15 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 		entry->io_flags = g_metacfg_pract_flag | g_metacfg_prchk_flags;
 	}
 
+	/* If metadata size = 8 bytes, PI is stripped (read) or inserted (write),
+	 *  and so reduce metadata size from block size.  (If metadata size > 8 bytes,
+	 *  PI is passed (read) or replaced (write).  So block size is not necessary
+	 *  to change.)
+	 */
+	if ((entry->io_flags & SPDK_NVME_IO_FLAGS_PRACT) && (entry->md_size == 8)) {
+		entry->block_size = spdk_nvme_ns_get_sector_size(ns);
+	}
+
 	if (g_max_io_md_size < entry->md_size) {
 		g_max_io_md_size = entry->md_size;
 	}
@@ -1095,6 +1104,7 @@ static void usage(char *program_name)
 	printf("\t[-D disable submission queue in controller memory buffer, default: enabled]\n");
 	printf("\t[-H enable header digest for TCP transport, default: disabled]\n");
 	printf("\t[-I enable data digest for TCP transport, default: disabled]\n");
+	printf("\t[-N no shutdown notification process for controllers, default: disabled]\n");
 	printf("\t[-r Transport ID for local PCIe NVMe or NVMeoF]\n");
 	printf("\t Format: 'key:value [key:value] ...'\n");
 	printf("\t Keys:\n");
@@ -1116,6 +1126,8 @@ static void usage(char *program_name)
 	printf("\t[-m max completions per poll]\n");
 	printf("\t\t(default: 0 - unlimited)\n");
 	printf("\t[-i shared memory group ID]\n");
+	printf("\t");
+	spdk_log_usage(stdout, "-T");
 	printf("\t[-V enable VMD enumeration]\n");
 #ifdef DEBUG
 	printf("\t[-G enable debug logging]\n");
@@ -1497,7 +1509,7 @@ parse_metadata(const char *metacfg_str)
 
 		if (strcmp(key, "PRACT") == 0) {
 			if (*val == '1') {
-				g_metacfg_prchk_flags = SPDK_NVME_IO_FLAGS_PRACT;
+				g_metacfg_pract_flag = SPDK_NVME_IO_FLAGS_PRACT;
 			}
 		} else if (strcmp(key, "PRCHK") == 0) {
 			if (strstr(val, "GUARD") != NULL) {
@@ -1524,6 +1536,7 @@ parse_args(int argc, char **argv)
 	int op;
 	bool mix_specified = false;
 	long int val;
+	int rc;
 
 	/* default value */
 	g_queue_depth = 0;
@@ -1534,7 +1547,7 @@ parse_args(int argc, char **argv)
 	g_core_mask = NULL;
 	g_max_completions = 0;
 
-	while ((op = getopt(argc, argv, "c:e:i:lm:n:o:q:r:k:s:t:w:DGHILM:U:V")) != -1) {
+	while ((op = getopt(argc, argv, "c:e:i:lm:n:o:q:r:k:s:t:w:DGHILM:NT:U:V")) != -1) {
 		switch (op) {
 		case 'i':
 		case 'm':
@@ -1628,6 +1641,24 @@ parse_args(int argc, char **argv)
 			break;
 		case 'L':
 			g_latency_sw_tracking_level++;
+			break;
+		case 'N':
+			g_no_shn_notification = true;
+			break;
+		case 'T':
+			rc = spdk_log_set_flag(optarg);
+			if (rc < 0) {
+				fprintf(stderr, "unknown flag\n");
+				usage(argv[0]);
+				exit(EXIT_FAILURE);
+			}
+			spdk_log_set_print_level(SPDK_LOG_DEBUG);
+#ifndef DEBUG
+			fprintf(stderr, "%s must be rebuilt with CONFIG_DEBUG=y for -T flag.\n",
+				argv[0]);
+			usage(argv[0]);
+			return 0;
+#endif
 			break;
 		case 'V':
 			g_vmd = true;
@@ -1790,6 +1821,9 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		if (g_disable_sq_cmb) {
 			opts->use_cmb_sqs = false;
 		}
+		if (g_no_shn_notification) {
+			opts->no_shn_notification = true;
+		}
 
 		printf("Attaching to NVMe Controller at %s\n",
 		       trid->traddr);
@@ -1819,7 +1853,6 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	struct spdk_pci_device	*pci_dev;
 	struct spdk_pci_id	pci_id;
 
-	g_controllers_found++;
 	if (trid->trtype != SPDK_NVME_TRANSPORT_PCIE) {
 		printf("Attached to NVMe over Fabrics controller at %s:%s: %s\n",
 		       trid->traddr, trid->trsvcid,

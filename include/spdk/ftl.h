@@ -41,6 +41,10 @@
 #include "spdk/thread.h"
 #include "spdk/bdev.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct spdk_ftl_dev;
 
 /* Limit thresholds */
@@ -79,13 +83,11 @@ struct spdk_ftl_conf {
 	/* IO pool size per user thread */
 	size_t					user_io_pool_size;
 
-	struct {
-		/* Lowest percentage of invalid lbks for a band to be defragged */
-		size_t				invalid_thld;
+	/* Lowest percentage of invalid lbks for a band to be defragged */
+	size_t					invalid_thld;
 
-		/* User writes limits */
-		struct spdk_ftl_limit		limits[SPDK_FTL_LIMIT_MAX];
-	} defrag;
+	/* User writes limits */
+	struct spdk_ftl_limit			limits[SPDK_FTL_LIMIT_MAX];
 
 	/* Number of interleaving units per ws_opt */
 	size_t                                  num_interleave_units;
@@ -148,12 +150,12 @@ struct spdk_ftl_attrs {
 	size_t					lbk_size;
 	/* Write buffer cache */
 	struct spdk_bdev_desc			*cache_bdev_desc;
-	/* Allow partial recovery after dirty shutdown */
-	bool					allow_open_bands;
 	/* Number of chunks per parallel unit in the underlying device (including any offline ones) */
 	size_t					num_chunks;
 	/* Number of sectors per chunk */
 	size_t					chunk_size;
+	/* Device specific configuration */
+	struct spdk_ftl_conf			conf;
 };
 
 struct ftl_module_init_opts {
@@ -216,7 +218,7 @@ int spdk_ftl_dev_init(const struct spdk_ftl_dev_init_opts *opts, spdk_ftl_init_f
  *
  * \return 0 if successfully scheduled free, negative errno otherwise.
  */
-int spdk_ftl_dev_free(struct spdk_ftl_dev *dev, spdk_ftl_fn cb, void *cb_arg);
+int spdk_ftl_dev_free(struct spdk_ftl_dev *dev, spdk_ftl_init_fn cb, void *cb_arg);
 
 /**
  * Initialize FTL configuration structure with default values.
@@ -279,5 +281,9 @@ int spdk_ftl_write(struct spdk_ftl_dev *dev, struct spdk_io_channel *ch, uint64_
  * \return 0 if successfully submitted, negative errno otherwise.
  */
 int spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* SPDK_FTL_H */

@@ -23,7 +23,7 @@ function create_veth_interfaces() {
 	ip netns del $TARGET_NAMESPACE || true
 	ip link delete $INITIATOR_INTERFACE || true
 
-	trap "cleanup_veth_interfaces $1; exit 1" SIGINT SIGTERM EXIT
+	trap 'cleanup_veth_interfaces $1; exit 1' SIGINT SIGTERM EXIT
 
 	# Create veth (Virtual ethernet) interface pair
 	ip link add $INITIATOR_INTERFACE type veth peer name $TARGET_INTERFACE
@@ -66,7 +66,7 @@ function cleanup_veth_interfaces() {
 function iscsitestinit() {
 	if [ "$1" == "iso" ]; then
 		$rootdir/scripts/setup.sh
-		if [ ! -z "$2" ]; then
+		if [ -n "$2" ]; then
 			create_veth_interfaces $2
 		else
 			# default to posix
@@ -92,7 +92,7 @@ function waitforiscsidevices() {
 
 function iscsitestfini() {
 	if [ "$1" == "iso" ]; then
-		if [ ! -z "$2" ]; then
+		if [ -n "$2" ]; then
 			cleanup_veth_interfaces $2
 		else
 			# default to posix
@@ -132,7 +132,7 @@ function start_vpp() {
 	# Start VPP process in SPDK target network namespace
 	$TARGET_NS_CMD vpp \
 		unix { nodaemon cli-listen /run/vpp/cli.sock } \
-		dpdk { no-pci num-mbufs 128000 } \
+		dpdk { no-pci } \
 		session { evt_qs_memfd_seg } \
 		socksvr { socket-name /run/vpp-api.sock } \
 		plugins { \
@@ -176,6 +176,8 @@ function start_vpp() {
 	ip addr show $INITIATOR_INTERFACE
 	ip netns exec $TARGET_NAMESPACE ip addr show $TARGET_INTERFACE
 	sleep 3
+	# SC1010: ping -M do - in this case do is an option not bash special word
+	# shellcheck disable=SC1010
 	ping -c 1 $TARGET_IP -s $(( $MTU - 28 )) -M do
 	vppctl ping $INITIATOR_IP repeat 1 size $(( $MTU - (28 + 8) )) verbose
 }

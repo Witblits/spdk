@@ -324,6 +324,7 @@ spdk_nvmf_ctrlr_create(struct spdk_nvmf_subsystem *subsystem,
 			1;
 
 	spdk_uuid_copy(&ctrlr->hostid, (struct spdk_uuid *)connect_data->hostid);
+	memcpy(ctrlr->hostnqn, connect_data->hostnqn, sizeof(ctrlr->hostnqn));
 
 	ctrlr->vcprop.cap.raw = 0;
 	ctrlr->vcprop.cap.bits.cqr = 1; /* NVMe-oF specification required */
@@ -591,6 +592,12 @@ spdk_nvmf_ctrlr_connect(struct spdk_nvmf_request *req)
 		SPDK_ERRLOG("Can not create SQSIZE %u for qpair=%p\n", cmd->sqsize, qpair);
 		rsp->status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
+	if (0 == qpair->qid) {
+		qpair->group->stat.admin_qpairs++;
+	} else {
+		qpair->group->stat.io_qpairs++;
 	}
 
 	if (cmd->qid == 0) {
@@ -1324,8 +1331,6 @@ spdk_nvmf_ctrlr_ns_changed(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid)
 			ctrlr->changed_ns_list.ns_list[ctrlr->changed_ns_list_count++] = nsid;
 		}
 	}
-
-	spdk_nvmf_ctrlr_async_event_ns_notice(ctrlr);
 }
 
 static void
@@ -1484,7 +1489,8 @@ spdk_nvmf_ctrlr_get_log_page(struct spdk_nvmf_request *req)
 	if (subsystem->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
 		switch (lid) {
 		case SPDK_NVME_LOG_DISCOVERY:
-			spdk_nvmf_get_discovery_log_page(subsystem->tgt, req->iov, req->iovcnt, offset, len);
+			spdk_nvmf_get_discovery_log_page(subsystem->tgt, ctrlr->hostnqn, req->iov, req->iovcnt, offset,
+							 len);
 			return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 		default:
 			goto invalid_log_page;

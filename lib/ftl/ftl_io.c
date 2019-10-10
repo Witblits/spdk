@@ -40,6 +40,7 @@
 #include "ftl_core.h"
 #include "ftl_rwb.h"
 #include "ftl_band.h"
+#include "ftl_debug.h"
 
 void
 ftl_io_inc_req(struct ftl_io *io)
@@ -272,6 +273,7 @@ struct ftl_io *
 ftl_io_init_internal(const struct ftl_io_init_opts *opts)
 {
 	struct ftl_io *io = opts->io;
+	struct ftl_io *parent = opts->parent;
 	struct spdk_ftl_dev *dev = opts->dev;
 	struct iovec iov = {
 		.iov_base = opts->data,
@@ -279,10 +281,10 @@ ftl_io_init_internal(const struct ftl_io_init_opts *opts)
 	};
 
 	if (!io) {
-		if (opts->parent) {
-			io = ftl_io_alloc_child(opts->parent);
+		if (parent) {
+			io = ftl_io_alloc_child(parent);
 		} else {
-			io = ftl_io_alloc(dev->ioch);
+			io = ftl_io_alloc(ftl_get_io_channel(dev));
 		}
 
 		if (!io) {
@@ -296,6 +298,14 @@ ftl_io_init_internal(const struct ftl_io_init_opts *opts)
 	io->rwb_batch = opts->rwb_batch;
 	io->band = opts->band;
 	io->md = opts->md;
+
+	if (parent) {
+		if (parent->flags & FTL_IO_VECTOR_LBA) {
+			io->lba.vector = parent->lba.vector + parent->pos;
+		} else {
+			io->lba.single = parent->lba.single + parent->pos;
+		}
+	}
 
 	if (ftl_io_init_iovec(io, &iov, 1, opts->lbk_cnt)) {
 		if (!opts->io) {
@@ -479,11 +489,17 @@ ftl_io_alloc_child(struct ftl_io *parent)
 void
 ftl_io_process_error(struct ftl_io *io, const struct spdk_nvme_cpl *status)
 {
+	char ppa_buf[128];
+
 	/* TODO: add error handling for specifc cases */
 	if (status->status.sct == SPDK_NVME_SCT_MEDIA_ERROR &&
 	    status->status.sc == SPDK_OCSSD_SC_READ_HIGH_ECC) {
 		return;
 	}
+
+	SPDK_ERRLOG("Status code type 0x%x, status code 0x%x for IO type %u @ppa: %s, lba 0x%lx, cnt %lu\n",
+		    status->status.sct, status->status.sc, io->type, ftl_ppa2str(io->ppa, ppa_buf, sizeof(ppa_buf)),
+		    ftl_io_get_lba(io, 0), io->lbk_cnt);
 
 	io->status = -EIO;
 }
@@ -554,12 +570,13 @@ ftl_io_reset(struct ftl_io *io)
 void
 ftl_io_free(struct ftl_io *io)
 {
-	struct ftl_io *parent = io->parent;
+	struct ftl_io *parent;
 
 	if (!io) {
 		return;
 	}
 
+	parent = io->parent;
 	if (parent && ftl_io_remove_child(io)) {
 		ftl_io_complete(parent);
 	}

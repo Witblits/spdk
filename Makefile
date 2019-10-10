@@ -37,13 +37,14 @@ SPDK_ROOT_DIR := $(CURDIR)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
 DIRS-y += lib
+DIRS-y += module
 DIRS-$(CONFIG_SHARED) += shared_lib
 DIRS-y += examples app include
 DIRS-$(CONFIG_TESTS) += test
 DIRS-$(CONFIG_IPSEC_MB) += ipsecbuild
 DIRS-$(CONFIG_ISAL) += isalbuild
 
-.PHONY: all clean $(DIRS-y) include/spdk/config.h mk/config.mk mk/cc.mk \
+.PHONY: all clean $(DIRS-y) include/spdk/config.h mk/config.mk \
 	cc_version cxx_version .libs_only_other .ldflags ldflags install \
 	uninstall
 
@@ -59,7 +60,7 @@ endif
 ifeq ($(CONFIG_SHARED),y)
 LIB = shared_lib
 else
-LIB = lib
+LIB = module
 endif
 
 ifeq ($(CONFIG_IPSEC_MB),y)
@@ -72,9 +73,8 @@ LIB += isalbuild
 DPDK_DEPS += isalbuild
 endif
 
-all: $(DIRS-y)
+all: mk/cc.mk $(DIRS-y)
 clean: $(DIRS-y)
-	$(Q)rm -f mk/cc.mk
 	$(Q)rm -f include/spdk/config.h
 
 install: all
@@ -87,20 +87,20 @@ ifneq ($(SKIP_DPDK_BUILD),1)
 dpdkbuild: $(DPDK_DEPS)
 endif
 
-shared_lib: lib
 lib: $(DPDKBUILD)
+module: lib
+shared_lib: module
 app: $(LIB)
 test: $(LIB)
 examples: $(LIB)
 pkgdep:
 	sh ./scripts/pkgdep.sh
 
-$(DIRS-y): mk/cc.mk include/spdk/config.h
+$(DIRS-y): include/spdk/config.h
 
 mk/cc.mk:
-	$(Q)scripts/detect_cc.sh --cc=$(CC) --cxx=$(CXX) --lto=$(CONFIG_LTO) --ld=$(LD) > $@.tmp; \
-	cmp -s $@.tmp $@ || mv $@.tmp $@ ; \
-	rm -f $@.tmp
+	$(Q)echo "Please run configure prior to make"
+	false
 
 include/spdk/config.h: mk/config.mk scripts/genconfig.py
 	$(Q)PYCMD=$$(cat PYTHON_COMMAND 2>/dev/null) ; \

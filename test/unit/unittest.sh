@@ -81,6 +81,7 @@ $valgrind $testdir/lib/blobfs/tree.c/tree_ut
 $valgrind $testdir/lib/blobfs/blobfs_async_ut/blobfs_async_ut
 # blobfs_sync_ut hangs when run under valgrind, so don't use $valgrind
 $testdir/lib/blobfs/blobfs_sync_ut/blobfs_sync_ut
+$valgrind $testdir/lib/blobfs/blobfs_bdev.c/blobfs_bdev_ut
 
 $valgrind $testdir/lib/event/subsystem.c/subsystem_ut
 $valgrind $testdir/lib/event/app.c/app_ut
@@ -163,6 +164,14 @@ $valgrind $testdir/lib/ftl/ftl_reloc.c/ftl_reloc_ut
 $valgrind $testdir/lib/ftl/ftl_wptr/ftl_wptr_ut
 $valgrind $testdir/lib/ftl/ftl_md/ftl_md_ut
 $valgrind $testdir/lib/ftl/ftl_io.c/ftl_io_ut
+fi
+
+if [ -e $testdir/lib/nvmf/fc.c/fc_ut ]; then
+	$valgrind $testdir/lib/nvmf/fc.c/fc_ut
+fi
+
+if [ -e $testdir/lib/nvmf/fc_ls.c/fc_ls_ut ]; then
+	$valgrind $testdir/lib/nvmf/fc_ls.c/fc_ls_ut
 fi
 
 # local unit test coverage

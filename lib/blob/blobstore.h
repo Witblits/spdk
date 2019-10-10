@@ -242,7 +242,7 @@ struct spdk_bs_md_mask {
 };
 
 #define SPDK_MD_DESCRIPTOR_TYPE_PADDING 0
-#define SPDK_MD_DESCRIPTOR_TYPE_EXTENT 1
+#define SPDK_MD_DESCRIPTOR_TYPE_EXTENT_RLE 1
 #define SPDK_MD_DESCRIPTOR_TYPE_XATTR 2
 #define SPDK_MD_DESCRIPTOR_TYPE_FLAGS 3
 #define SPDK_MD_DESCRIPTOR_TYPE_XATTR_INTERNAL 4
@@ -258,7 +258,7 @@ struct spdk_blob_md_descriptor_xattr {
 	/* String name immediately followed by string value. */
 };
 
-struct spdk_blob_md_descriptor_extent {
+struct spdk_blob_md_descriptor_extent_rle {
 	uint8_t		type;
 	uint32_t	length;
 
@@ -320,6 +320,8 @@ struct spdk_blob_md_page {
 };
 #define SPDK_BS_PAGE_SIZE 0x1000
 SPDK_STATIC_ASSERT(SPDK_BS_PAGE_SIZE == sizeof(struct spdk_blob_md_page), "Invalid md page size");
+
+#define SPDK_BS_MAX_DESC_SIZE sizeof(((struct spdk_blob_md_page*)0)->descriptors)
 
 #define SPDK_BS_SUPER_BLOCK_SIG "SPDKBLOB"
 

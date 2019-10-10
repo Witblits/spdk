@@ -49,7 +49,7 @@ function raid_unmap_data_verify() {
 }
 
 function on_error_exit() {
-	if [ ! -z $raid_pid ]; then
+	if [ -n "$raid_pid" ]; then
 		killprocess $raid_pid
 	fi
 
@@ -61,9 +61,9 @@ function on_error_exit() {
 function configure_raid_bdev() {
 	rm -rf $testdir/rpcs.txt
 
-	echo construct_malloc_bdev 32 512 -b Base_1 >> $testdir/rpcs.txt
-	echo construct_malloc_bdev 32 512 -b Base_2 >> $testdir/rpcs.txt
-	echo construct_raid_bdev -z 64 -r 0 -b \"Base_1 Base_2\" -n raid0 >> $testdir/rpcs.txt
+	echo bdev_malloc_create 32 512 -b Base_1 >> $testdir/rpcs.txt
+	echo bdev_malloc_create 32 512 -b Base_2 >> $testdir/rpcs.txt
+	echo bdev_raid_create -z 64 -r 0 -b \"Base_1 Base_2\" -n raid0 >> $testdir/rpcs.txt
 	$rpc_py < $testdir/rpcs.txt
 
 	rm -rf $testdir/rpcs.txt
@@ -81,7 +81,7 @@ function raid_function_test() {
 		waitforlisten $raid_pid $rpc_server
 
 		configure_raid_bdev
-		raid_bdev=$($rpc_py get_raid_bdevs online | cut -d ' ' -f 1)
+		raid_bdev=$($rpc_py bdev_raid_get_bdevs online | cut -d ' ' -f 1)
 		if [ $raid_bdev = "" ]; then
 			echo "No raid0 device in SPDK app"
 			return 1

@@ -42,8 +42,9 @@
 #include "ftl_trace.h"
 
 struct ftl_rwb;
-struct spdk_ftl_conf;
 struct ftl_rwb_batch;
+struct ftl_band;
+struct spdk_ftl_conf;
 
 enum ftl_rwb_entry_type {
 	FTL_RWB_TYPE_INTERNAL,
@@ -64,6 +65,9 @@ struct ftl_rwb_entry {
 
 	/* Physical address */
 	struct ftl_ppa				ppa;
+
+	/* Band the data is moved from (only valid when relocating data) */
+	struct ftl_band				*band;
 
 	/* Position within the rwb's buffer */
 	unsigned int				pos;
@@ -114,6 +118,7 @@ struct ftl_rwb_entry *ftl_rwb_batch_first_entry(struct ftl_rwb_batch *batch);
 void	*ftl_rwb_batch_get_data(struct ftl_rwb_batch *batch);
 void	*ftl_rwb_batch_get_md(struct ftl_rwb_batch *batch);
 void	ftl_rwb_disable_interleaving(struct ftl_rwb *rwb);
+unsigned int ftl_rwb_num_pending(struct ftl_rwb *rwb);
 
 static inline void
 _ftl_rwb_entry_set_valid(struct ftl_rwb_entry *entry, bool valid)

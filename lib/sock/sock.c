@@ -103,6 +103,7 @@ spdk_sock_map_release(int placement_id)
 			entry->ref--;
 			if (!entry->ref) {
 				STAILQ_REMOVE(&g_placement_id_map, entry, spdk_sock_placement_id_entry, link);
+				free(entry);
 			}
 			break;
 		}
@@ -133,11 +134,14 @@ spdk_sock_map_lookup(int placement_id, struct spdk_sock_group **group)
 static void
 spdk_sock_remove_sock_group_from_map_table(struct spdk_sock_group *group)
 {
-	struct spdk_sock_placement_id_entry *entry;
+	struct spdk_sock_placement_id_entry *entry, *tmp;
 
 	pthread_mutex_lock(&g_map_table_mutex);
-	STAILQ_FOREACH(entry, &g_placement_id_map, link) {
-		STAILQ_REMOVE(&g_placement_id_map, entry, spdk_sock_placement_id_entry, link);
+	STAILQ_FOREACH_SAFE(entry, &g_placement_id_map, link, tmp) {
+		if (entry->group == group) {
+			STAILQ_REMOVE(&g_placement_id_map, entry, spdk_sock_placement_id_entry, link);
+			free(entry);
+		}
 	}
 	pthread_mutex_unlock(&g_map_table_mutex);
 
@@ -284,6 +288,12 @@ int
 spdk_sock_set_sendbuf(struct spdk_sock *sock, int sz)
 {
 	return sock->net_impl->set_sendbuf(sock, sz);
+}
+
+int
+spdk_sock_set_priority(struct spdk_sock *sock, int priority)
+{
+	return sock->net_impl->set_priority(sock, priority);
 }
 
 bool
@@ -446,14 +456,14 @@ spdk_sock_group_impl_poll_count(struct spdk_sock_group_impl *group_impl,
 		assert(sock->cb_fn != NULL);
 		sock->cb_fn(sock->cb_arg, group, sock);
 	}
-	return 0;
+	return num_events;
 }
 
 int
 spdk_sock_group_poll_count(struct spdk_sock_group *group, int max_events)
 {
 	struct spdk_sock_group_impl *group_impl = NULL;
-	int rc, final_rc = 0;
+	int rc, num_events = 0;
 
 	if (max_events < 1) {
 		errno = -EINVAL;
@@ -470,14 +480,16 @@ spdk_sock_group_poll_count(struct spdk_sock_group *group, int max_events)
 
 	STAILQ_FOREACH_FROM(group_impl, &group->group_impls, link) {
 		rc = spdk_sock_group_impl_poll_count(group_impl, group, max_events);
-		if (rc != 0) {
-			final_rc = rc;
+		if (rc < 0) {
+			num_events = -1;
 			SPDK_ERRLOG("group_impl_poll_count for net(%s) failed\n",
 				    group_impl->net_impl->name);
+		} else if (num_events >= 0) {
+			num_events += rc;
 		}
 	}
 
-	return final_rc;
+	return num_events;
 }
 
 int
@@ -504,7 +516,6 @@ spdk_sock_group_close(struct spdk_sock_group **group)
 			SPDK_ERRLOG("group_impl_close for net(%s) failed\n",
 				    group_impl->net_impl->name);
 		}
-		free(group_impl);
 	}
 
 	spdk_sock_remove_sock_group_from_map_table(*group);

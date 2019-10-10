@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -312,8 +312,6 @@ _spdk_nvmf_subsystem_remove_host(struct spdk_nvmf_subsystem *subsystem, struct s
 	free(host);
 }
 
-static int _spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid);
-
 static void
 _nvmf_subsystem_remove_listener(struct spdk_nvmf_subsystem *subsystem,
 				struct spdk_nvmf_listener *listener)
@@ -361,7 +359,7 @@ spdk_nvmf_subsystem_destroy(struct spdk_nvmf_subsystem *subsystem)
 	while (ns != NULL) {
 		struct spdk_nvmf_ns *next_ns = spdk_nvmf_subsystem_get_next_ns(subsystem, ns);
 
-		_spdk_nvmf_subsystem_remove_ns(subsystem, ns->opts.nsid);
+		spdk_nvmf_subsystem_remove_ns(subsystem, ns->opts.nsid);
 		ns = next_ns;
 	}
 
@@ -895,21 +893,19 @@ spdk_nvmf_subsystem_ns_changed(struct spdk_nvmf_subsystem *subsystem, uint32_t n
 	}
 }
 
-static int
-_spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
+int
+spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
 {
 	struct spdk_nvmf_ns *ns;
 	struct spdk_nvmf_registrant *reg, *reg_tmp;
 
-	assert(subsystem->state == SPDK_NVMF_SUBSYSTEM_PAUSED ||
-	       subsystem->state == SPDK_NVMF_SUBSYSTEM_INACTIVE);
-
-	if (nsid == 0 || nsid > subsystem->max_nsid) {
+	if (!(subsystem->state == SPDK_NVMF_SUBSYSTEM_INACTIVE ||
+	      subsystem->state == SPDK_NVMF_SUBSYSTEM_PAUSED)) {
+		assert(false);
 		return -1;
 	}
 
-	if (!(subsystem->state == SPDK_NVMF_SUBSYSTEM_INACTIVE ||
-	      subsystem->state == SPDK_NVMF_SUBSYSTEM_PAUSED)) {
+	if (nsid == 0 || nsid > subsystem->max_nsid) {
 		return -1;
 	}
 
@@ -936,50 +932,19 @@ _spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t n
 	return 0;
 }
 
-int
-spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid,
-			      spdk_nvmf_subsystem_state_change_done cb_fn, void *cb_arg)
-{
-	int rc;
-	struct subsystem_update_ns_ctx *ctx;
-
-	rc = _spdk_nvmf_subsystem_remove_ns(subsystem, nsid);
-	if (rc < 0) {
-		return rc;
-	}
-
-	ctx = calloc(1, sizeof(*ctx));
-
-	if (ctx == NULL) {
-		return -ENOMEM;
-	}
-
-	ctx->subsystem = subsystem;
-	ctx->cb_fn = cb_fn;
-	ctx->cb_arg = cb_arg;
-
-	spdk_nvmf_subsystem_update_ns(subsystem, subsystem_update_ns_done, ctx);
-
-	return 0;
-}
-
-static void
-_spdk_nvmf_ns_hot_remove_done(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int status)
-{
-	if (status != 0) {
-		SPDK_ERRLOG("Failed to make changes to NVMe-oF subsystem with id %u\n", subsystem->id);
-	}
-	spdk_nvmf_subsystem_resume(subsystem, NULL, NULL);
-}
-
 static void
 _spdk_nvmf_ns_hot_remove(struct spdk_nvmf_subsystem *subsystem,
 			 void *cb_arg, int status)
 {
 	struct spdk_nvmf_ns *ns = cb_arg;
+	int rc;
 
-	spdk_nvmf_subsystem_remove_ns(subsystem, ns->opts.nsid, _spdk_nvmf_ns_hot_remove_done,
-				      subsystem);
+	rc = spdk_nvmf_subsystem_remove_ns(subsystem, ns->opts.nsid);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to make changes to NVME-oF subsystem with id: %u\n", subsystem->id);
+	}
+
+	spdk_nvmf_subsystem_resume(subsystem, NULL, NULL);
 }
 
 static void
@@ -991,6 +956,51 @@ spdk_nvmf_ns_hot_remove(void *remove_ctx)
 	rc = spdk_nvmf_subsystem_pause(ns->subsystem, _spdk_nvmf_ns_hot_remove, ns);
 	if (rc) {
 		SPDK_ERRLOG("Unable to pause subsystem to process namespace removal!\n");
+	}
+}
+
+static void
+_spdk_nvmf_ns_resize(struct spdk_nvmf_subsystem *subsystem, void *cb_arg, int status)
+{
+	struct spdk_nvmf_ns *ns = cb_arg;
+
+	spdk_nvmf_subsystem_ns_changed(subsystem, ns->opts.nsid);
+	spdk_nvmf_subsystem_resume(subsystem, NULL, NULL);
+}
+
+static void
+spdk_nvmf_ns_resize(void *event_ctx)
+{
+	struct spdk_nvmf_ns *ns = event_ctx;
+	int rc;
+
+	rc = spdk_nvmf_subsystem_pause(ns->subsystem, _spdk_nvmf_ns_resize, ns);
+	if (rc) {
+		SPDK_ERRLOG("Unable to pause subsystem to process namespace resize!\n");
+	}
+}
+
+static void
+spdk_nvmf_ns_event(enum spdk_bdev_event_type type,
+		   struct spdk_bdev *bdev,
+		   void *event_ctx)
+{
+	SPDK_DEBUGLOG(SPDK_LOG_NVMF, "Bdev event: type %d, name %s, subsystem_id %d, ns_id %d\n",
+		      type,
+		      bdev->name,
+		      ((struct spdk_nvmf_ns *)event_ctx)->subsystem->id,
+		      ((struct spdk_nvmf_ns *)event_ctx)->nsid);
+
+	switch (type) {
+	case SPDK_BDEV_EVENT_REMOVE:
+		spdk_nvmf_ns_hot_remove(event_ctx);
+		break;
+	case SPDK_BDEV_EVENT_RESIZE:
+		spdk_nvmf_ns_resize(event_ctx);
+		break;
+	default:
+		SPDK_NOTICELOG("Unsupported bdev event: type %d\n", type);
+		break;
 	}
 }
 
@@ -1100,7 +1110,7 @@ spdk_nvmf_subsystem_add_ns(struct spdk_nvmf_subsystem *subsystem, struct spdk_bd
 	ns->bdev = bdev;
 	ns->opts = opts;
 	ns->subsystem = subsystem;
-	rc = spdk_bdev_open(bdev, true, spdk_nvmf_ns_hot_remove, ns, &ns->desc);
+	rc = spdk_bdev_open_ext(bdev->name, true, spdk_nvmf_ns_event, ns, &ns->desc);
 	if (rc != 0) {
 		SPDK_ERRLOG("Subsystem %s: bdev %s cannot be opened, error=%d\n",
 			    subsystem->subnqn, spdk_bdev_get_name(bdev), rc);

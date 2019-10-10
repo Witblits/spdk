@@ -37,14 +37,24 @@ def main():
     add_quotes_to_shell(spdk_shell)
 
     parser = argparse.ArgumentParser(description="SPDK command line interface")
-    parser.add_argument("-s", dest="socket", help="RPC socket path", default="/var/tmp/spdk.sock")
+    parser.add_argument('-s', dest='server_addr',
+                        help='RPC domain socket path or IP address', default='/var/tmp/spdk.sock')
+    parser.add_argument('-p', dest='port',
+                        help='RPC port number (if server_addr is IP address)',
+                        default=None, type=int)
     parser.add_argument("-v", dest="verbose", help="Print request/response JSON for configuration calls",
                         default=False, action="store_true")
     parser.add_argument("commands", metavar="command", type=str, nargs="*", default="",
                         help="commands to execute by SPDKCli as one-line command")
     args = parser.parse_args()
 
-    with rpc.client.JSONRPCClient(args.socket) as client:
+    try:
+        client = rpc.client.JSONRPCClient(args.server_addr, port=args.port)
+    except JSONRPCException as e:
+        spdk_shell.log.error("%s. SPDK not running?" % e)
+        sys.exit(1)
+
+    with client:
         root_node = UIRoot(client, spdk_shell)
         root_node.verbose = args.verbose
         try:
@@ -68,6 +78,9 @@ def main():
                 spdk_shell.run_interactive()
             except (JSONRPCException, ExecutionError) as e:
                 spdk_shell.log.error("%s" % e)
+            except BrokenPipeError as e:
+                spdk_shell.log.error("Lost connection with SPDK: %s" % e)
+                break
 
 
 if __name__ == "__main__":

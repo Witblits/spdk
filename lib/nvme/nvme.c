@@ -39,8 +39,6 @@
 struct nvme_driver	*g_spdk_nvme_driver;
 pid_t			g_spdk_nvme_pid;
 
-int32_t			spdk_nvme_retry_count;
-
 /* gross timeout of 180 seconds in milliseconds */
 static int g_nvme_driver_timeout_ms = 3 * 60 * 1000;
 
@@ -428,6 +426,8 @@ nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 			SPDK_ERRLOG("Failed to construct NVMe controller for SSD: %s\n", trid->traddr);
 			return -1;
 		}
+		ctrlr->remove_cb = probe_ctx->remove_cb;
+		ctrlr->cb_ctx = probe_ctx->cb_ctx;
 
 		TAILQ_INSERT_TAIL(&probe_ctx->init_ctrlrs, ctrlr, tailq);
 		return 0;
@@ -448,6 +448,7 @@ nvme_ctrlr_poll_internal(struct spdk_nvme_ctrlr *ctrlr,
 		/* Controller failed to initialize. */
 		TAILQ_REMOVE(&probe_ctx->init_ctrlrs, ctrlr, tailq);
 		SPDK_ERRLOG("Failed to initialize SSD: %s\n", ctrlr->trid.traddr);
+		nvme_ctrlr_fail(ctrlr, false);
 		nvme_ctrlr_destruct(ctrlr);
 		return rc;
 	}

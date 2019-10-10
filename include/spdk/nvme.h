@@ -44,15 +44,9 @@
 extern "C" {
 #endif
 
-#include "spdk/config.h"
 #include "spdk/env.h"
 #include "spdk/nvme_spec.h"
 #include "spdk/nvmf_spec.h"
-
-#define SPDK_NVME_DEFAULT_RETRY_COUNT	(4)
-extern int32_t		spdk_nvme_retry_count;
-
-
 
 /**
  * Opaque handle to a controller. Returned by spdk_nvme_probe()'s attach_cb.
@@ -78,9 +72,42 @@ struct spdk_nvme_ctrlr_opts {
 	bool use_cmb_sqs;
 
 	/**
+	 * Don't initiate shutdown processing
+	 */
+	bool no_shn_notification;
+
+	/**
 	 * Type of arbitration mechanism
 	 */
 	enum spdk_nvme_cc_ams arb_mechanism;
+
+	/**
+	 * Maximum number of commands that the controller may launch at one time.  The
+	 * value is expressed as a power of two, valid values are from 0-7, and 7 means
+	 * unlimited.
+	 */
+	uint8_t arbitration_burst;
+
+	/**
+	 * Number of commands that may be executed from the low priority queue in each
+	 * arbitration round.  This field is only valid when arb_mechanism is set to
+	 * SPDK_NVME_CC_AMS_WRR (weighted round robin).
+	 */
+	uint8_t low_priority_weight;
+
+	/**
+	 * Number of commands that may be executed from the medium priority queue in each
+	 * arbitration round.  This field is only valid when arb_mechanism is set to
+	 * SPDK_NVME_CC_AMS_WRR (weighted round robin).
+	 */
+	uint8_t medium_priority_weight;
+
+	/**
+	 * Number of commands that may be executed from the high priority queue in each
+	 * arbitration round.  This field is only valid when arb_mechanism is set to
+	 * SPDK_NVME_CC_AMS_WRR (weighted round robin).
+	 */
+	uint8_t high_priority_weight;
 
 	/**
 	 * Keep alive timeout in milliseconds (0 = disabled).
@@ -95,7 +122,7 @@ struct spdk_nvme_ctrlr_opts {
 	/**
 	 * Specify the retry number when there is issue with the transport
 	 */
-	int transport_retry_count;
+	uint8_t transport_retry_count;
 
 	/**
 	 * The queue depth of each NVMe I/O queue.
@@ -323,6 +350,7 @@ struct spdk_nvme_host_id {
 enum spdk_nvme_ctrlr_flags {
 	SPDK_NVME_CTRLR_SGL_SUPPORTED			= 0x1, /**< The SGL is supported */
 	SPDK_NVME_CTRLR_SECURITY_SEND_RECV_SUPPORTED	= 0x2, /**< security send/receive is supported */
+	SPDK_NVME_CTRLR_WRR_SUPPORTED			= 0x4, /**< Weighted Round Robin is supported */
 };
 
 /**
@@ -1786,6 +1814,7 @@ enum spdk_nvme_ns_flags {
 	SPDK_NVME_NS_EXTENDED_LBA_SUPPORTED	= 0x20, /**< The extended lba format is supported,
 							      metadata is transferred as a contiguous
 							      part of the logical block that it is associated with */
+	SPDK_NVME_NS_WRITE_UNCORRECTABLE_SUPPORTED	= 0x40, /**< The write uncorrectable command is supported */
 };
 
 /**
@@ -1958,6 +1987,27 @@ int spdk_nvme_ns_cmd_write_zeroes(struct spdk_nvme_ns *ns, struct spdk_nvme_qpai
 				  uint64_t lba, uint32_t lba_count,
 				  spdk_nvme_cmd_cb cb_fn, void *cb_arg,
 				  uint32_t io_flags);
+
+/**
+ * Submit a write uncorrectable I/O to the specified NVMe namespace.
+ *
+ * The command is submitted to a qpair allocated by spdk_nvme_ctrlr_alloc_io_qpair().
+ * The user must ensure that only one thread submits I/O on a given qpair at any
+ * given time.
+ *
+ * \param ns NVMe namespace to submit the write uncorrectable I/O.
+ * \param qpair I/O queue pair to submit the request.
+ * \param lba Starting LBA for this command.
+ * \param lba_count Length (in sectors) for the write uncorrectable operation.
+ * \param cb_fn Callback function to invoke when the I/O is completed.
+ * \param cb_arg Argument to pass to the callback function.
+ *
+ * \return 0 if successfully submitted, negated errno if an nvme_request structure
+ * cannot be allocated for the I/O request.
+ */
+int spdk_nvme_ns_cmd_write_uncorrectable(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
+		uint64_t lba, uint32_t lba_count,
+		spdk_nvme_cmd_cb cb_fn, void *cb_arg);
 
 /**
  * \brief Submits a read I/O to the specified NVMe namespace.
@@ -2346,7 +2396,32 @@ void spdk_nvme_qpair_remove_cmd_error_injection(struct spdk_nvme_ctrlr *ctrlr,
 		struct spdk_nvme_qpair *qpair,
 		uint8_t opc);
 
-#ifdef SPDK_CONFIG_RDMA
+/**
+ * \brief Given NVMe status, return ASCII string for that error.
+ *
+ * \param status Status from NVMe completion queue element.
+ * \return Returns status as an ASCII string.
+ */
+const char *spdk_nvme_cpl_get_status_string(const struct spdk_nvme_status *status);
+
+/**
+ * \brief Prints (SPDK_NOTICELOG) the contents of an NVMe submission queue entry (command).
+ *
+ * \param qpair Pointer to the NVMe queue pair - used to determine admin versus I/O queue.
+ * \param cmd Pointer to the submission queue command to be formatted.
+ */
+void spdk_nvme_qpair_print_command(struct spdk_nvme_qpair *qpair,
+				   struct spdk_nvme_cmd *cmd);
+
+/**
+ * \brief Prints (SPDK_NOTICELOG) the contents of an NVMe completion queue entry.
+ *
+ * \param qpair Pointer to the NVMe queue pair - presently unused.
+ * \param cpl Pointer to the completion queue element to be formatted.
+ */
+void spdk_nvme_qpair_print_completion(struct spdk_nvme_qpair *qpair,
+				      struct spdk_nvme_cpl *cpl);
+
 struct ibv_context;
 struct ibv_pd;
 struct ibv_mr;
@@ -2391,8 +2466,6 @@ struct spdk_nvme_rdma_hooks {
  * \param hooks for initializing global hooks
  */
 void spdk_nvme_rdma_init_hooks(struct spdk_nvme_rdma_hooks *hooks);
-
-#endif
 
 #ifdef __cplusplus
 }

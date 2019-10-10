@@ -22,7 +22,7 @@ ISCSI_TGT_CM=0x02
 # Performance test for iscsi_tgt, run on devices with proper hardware support (target and inititator)
 function usage()
 {
-	[[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+	[[ -n $2 ]] && ( echo "$2"; echo ""; )
 	echo "Usage: $(basename $1) [options]"
 	echo "-h, --help                Print help and exit"
 	echo "    --fiopath=PATH        Path to fio directory on initiator. [default=$FIO_PATH]"
@@ -81,28 +81,28 @@ touch $iscsi_fio_results
 timing_enter run_iscsi_app
 $rootdir/app/iscsi_tgt/iscsi_tgt -m $ISCSI_TGT_CM -r $testdir/rpc_iscsi.sock --wait-for-rpc &
 pid=$!
-trap "rm -f $testdir/perf.job; killprocess $pid; print_backtrace; exit 1" ERR SIGTERM SIGABRT
+trap 'rm -f $testdir/perf.job; killprocess $pid; print_backtrace; exit 1' ERR SIGTERM SIGABRT
 waitforlisten "$pid" "$testdir/rpc_iscsi.sock"
-$rpc_py set_iscsi_options -b "iqn.2016-06.io.spdk" -f "/usr/local/etc/spdk/auth.conf" -o 30 -i -l 0 -a 16
-$rpc_py start_subsystem_init
+$rpc_py iscsi_set_options -b "iqn.2016-06.io.spdk" -f "/usr/local/etc/spdk/auth.conf" -o 30 -i -l 0 -a 16
+$rpc_py framework_start_init
 $rootdir/scripts/gen_nvme.sh --json | $rpc_py load_subsystem_config
 sleep 1
 timing_exit run_iscsi_app
 
 timing_enter iscsi_config
-bdevs=($($rpc_py get_bdevs | jq -r '.[].name'))
-if [ $DISKNO == "ALL" ] || [ $DISKNO == "all" ]; then
+bdevs=($($rpc_py bdev_get_bdevs | jq -r '.[].name'))
+if [[ $DISKNO == "ALL" ]] || [[ $DISKNO == "all" ]]; then
 	DISKNO=${#bdevs[@]}
-elif [ $DISKNO -gt ${#bdevs[@]} ] || [ ! $DISKNO =~ ^[0-9]+$ ]; then
+elif [[ $DISKNO -gt ${#bdevs[@]} ]] || [[ ! $DISKNO =~ ^[0-9]+$ ]]; then
 	error "Required device number ($DISKNO) is not a valid number or it's larger than the number of devices found (${#bdevs[@]})"
 fi
 
-$rpc_py add_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT
-$rpc_py add_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK
+$rpc_py iscsi_create_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT
+$rpc_py iscsi_create_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK
 
 for (( i=0; i < $DISKNO; i++ ))
 do
-	$rpc_py construct_target_node Target${i} Target${i}_alias "${bdevs[i]}:0" "$PORTAL_TAG:$INITIATOR_TAG" 64 -d
+	$rpc_py iscsi_create_target_node Target${i} Target${i}_alias "${bdevs[i]}:0" "$PORTAL_TAG:$INITIATOR_TAG" 64 -d
 done
 
 cat $testdir/perf.job | ssh_initiator "cat > perf.job"

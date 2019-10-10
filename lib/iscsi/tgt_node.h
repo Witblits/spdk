@@ -83,7 +83,7 @@ struct spdk_iscsi_tgt_node {
 	 *  target node.
 	 */
 	uint32_t num_active_conns;
-	int lcore;
+	struct spdk_iscsi_poll_group *pg;
 
 	int num_pg_maps;
 	TAILQ_HEAD(, spdk_iscsi_pg_map) pg_map_head;
@@ -127,10 +127,10 @@ spdk_iscsi_tgt_node_construct(int target_index,
 
 bool spdk_iscsi_check_chap_params(bool disable, bool require, bool mutual, int group);
 
-int spdk_iscsi_tgt_node_add_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
-				       int *pg_tag_list, int *ig_tag_list,
-				       uint16_t num_maps);
-int spdk_iscsi_tgt_node_delete_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
+int spdk_iscsi_target_node_add_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
+		int *pg_tag_list, int *ig_tag_list,
+		uint16_t num_maps);
+int spdk_iscsi_target_node_remove_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
 		int *pg_tag_list, int *ig_tag_list,
 		uint16_t num_maps);
 

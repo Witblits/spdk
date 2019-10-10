@@ -1,19 +1,22 @@
 : ${SPDK_VHOST_VERBOSE=false}
-: ${QEMU_PREFIX="/usr/local/qemu/spdk-3.0.0"}
-: ${VM_IMAGE="$HOME/vhost_vm_image.qcow2"}
+: ${VHOST_DIR="$HOME/vhost_test"}
 
 TEST_DIR=$(readlink -f $rootdir/..)
+VM_DIR=$VHOST_DIR/vms
+TARGET_DIR=$VHOST_DIR/vhost
+VM_PASSWORD="root"
 
-#Check if qemu exists
-if [ ! -d $QEMU_PREFIX ]; then
-	error "Qemu not installed on this machine."
+#TODO: Move vhost_vm_image.qcow2 into VHOST_DIR on test systems.
+VM_IMAGE=$HOME/vhost_vm_image.qcow2
+
+if ! hash qemu-img qemu-system-x86_64; then
+	error 'QEMU is not installed on this system. Unable to run vhost tests.'
 	exit 1
 fi
-echo "Using qemu folder $QEMU_PREFIX"
 
-VM_BASE_DIR="$TEST_DIR/vms"
-
-mkdir -p $TEST_DIR
+mkdir -p $VHOST_DIR
+mkdir -p $VM_DIR
+mkdir -p $TARGET_DIR
 
 #
 # Source config describing QEMU and VHOST cores and NUMA
@@ -24,7 +27,22 @@ function vhosttestinit()
 {
 	if [ "$TEST_MODE" == "iso" ]; then
 		$rootdir/scripts/setup.sh
-		# TODO: Test for VM image in correct spot
+
+		# Look for the VM image
+		if [[ ! -f $VM_IMAGE ]]; then
+			echo "VM image not found at $VM_IMAGE"
+			echo "Download to $HOME? [yn]"
+			read download
+			if [ "$download" = "y" ]; then
+				curl https://dqtibwqq6s6ux.cloudfront.net/download/test_resources/vhost_vm_image.tar.gz | tar xz -C $HOME
+			fi
+		fi
+	fi
+
+	# Look for the VM image
+	if [[ ! -f $VM_IMAGE ]]; then
+		error "VM image not found at $VM_IMAGE"
+		exit 1
 	fi
 }
 
@@ -79,57 +97,32 @@ function notice()
 
 function get_vhost_dir()
 {
-	if [[ ! -z "$1" ]]; then
-		assert_number "$1"
-		local vhost_num=$1
-	else
-		local vhost_num=0
+	local vhost_name="$1"
+
+	if [[ -z "$vhost_name" ]]; then
+		error "vhost name must be provided to get_vhost_dir"
+		return 1
 	fi
 
-	echo "$TEST_DIR/vhost${vhost_num}"
-}
-
-function vhost_list_all()
-{
-	shopt -s nullglob
-	local vhost_list="$(echo $TEST_DIR/vhost[0-9]*)"
-	shopt -u nullglob
-
-	if [[ ! -z "$vhost_list" ]]; then
-		vhost_list="$(basename --multiple $vhost_list)"
-		echo "${vhost_list//vhost/}"
-	fi
+	echo "$TARGET_DIR/${vhost_name}"
 }
 
 function vhost_run()
 {
-	local param
-	local vhost_num=0
-	local memory=1024
+	local vhost_name="$1"
 
-	for param in "$@"; do
-		case $param in
-			--vhost-num=*)
-				vhost_num="${param#*=}"
-				assert_number "$vhost_num"
-				;;
-			--json-path=*) local vhost_json_path="${param#*=}" ;;
-			--memory=*) local memory=${param#*=} ;;
-			--no-pci*) local no_pci="-u" ;;
-			*)
-				error "Invalid parameter '$param'"
-				return 1
-				;;
-		esac
-	done
+	if [[ -z "$vhost_name" ]]; then
+		error "vhost name must be provided to vhost_run"
+		return 1
+	fi
 
-	local vhost_dir="$(get_vhost_dir $vhost_num)"
+	local vhost_dir="$(get_vhost_dir $vhost_name)"
 	local vhost_app="$rootdir/app/vhost/vhost"
 	local vhost_log_file="$vhost_dir/vhost.log"
 	local vhost_pid_file="$vhost_dir/vhost.pid"
 	local vhost_socket="$vhost_dir/usvhost"
 	notice "starting vhost app in background"
-	[[ -r "$vhost_pid_file" ]] && vhost_kill $vhost_num
+	[[ -r "$vhost_pid_file" ]] && vhost_kill $vhost_name
 	[[ -d $vhost_dir ]] && rm -f $vhost_dir/*
 	mkdir -p $vhost_dir
 
@@ -138,18 +131,7 @@ function vhost_run()
 		return 1
 	fi
 
-	local reactor_mask="vhost_${vhost_num}_reactor_mask"
-	reactor_mask="${!reactor_mask}"
-
-	local master_core="vhost_${vhost_num}_master_core"
-	master_core="${!master_core}"
-
-	if [[ -z "$reactor_mask" ]] || [[ -z "$master_core" ]]; then
-		error "Parameters vhost_${vhost_num}_reactor_mask or vhost_${vhost_num}_master_core not found in autotest.config file"
-		return 1
-	fi
-
-	local cmd="$vhost_app -m $reactor_mask -p $master_core -s $memory -r $vhost_dir/rpc.sock $no_pci"
+	local cmd="$vhost_app -r $vhost_dir/rpc.sock $2"
 
 	notice "Loging to:   $vhost_log_file"
 	notice "Socket:      $vhost_socket"
@@ -163,29 +145,36 @@ function vhost_run()
 	notice "waiting for app to run..."
 	waitforlisten "$vhost_pid" "$vhost_dir/rpc.sock"
 	#do not generate nvmes if pci access is disabled
-	if [[ -z "$no_pci" ]]; then
+	if [[ "$cmd" != *"--no-pci"* ]] && [[ "$cmd" != *"-u"* ]]; then
 		$rootdir/scripts/gen_nvme.sh "--json" | $rootdir/scripts/rpc.py\
 		 -s $vhost_dir/rpc.sock load_subsystem_config
-	fi
-
-	if [[ -n "$vhost_json_path" ]]; then
-		$rootdir/scripts/rpc.py -s $vhost_dir/rpc.sock load_config < "$vhost_json_path/conf.json"
 	fi
 
 	notice "vhost started - pid=$vhost_pid"
 	timing_exit vhost_start
 }
 
+function vhost_load_config()
+{
+	local vhost_num="$1"
+	local vhost_json_conf="$2"
+	local vhost_dir="$(get_vhost_dir $vhost_num)"
+
+	$rootdir/scripts/rpc.py -s $vhost_dir/rpc.sock load_config < "$vhost_json_conf"
+}
+
 function vhost_kill()
 {
 	local rc=0
-	local vhost_num=0
-	if [[ ! -z "$1" ]]; then
-		vhost_num=$1
-		assert_number "$vhost_num"
+	local vhost_name="$1"
+
+	if [[ -z "$vhost_name" ]]; then
+		error "Must provide vhost name to vhost_kill"
+		return 0
 	fi
 
-	local vhost_pid_file="$(get_vhost_dir $vhost_num)/vhost.pid"
+	local vhost_dir="$(get_vhost_dir $vhost_name)"
+	local vhost_pid_file="$vhost_dir/vhost.pid"
 
 	if [[ ! -r $vhost_pid_file ]]; then
 		warning "no vhost pid file found"
@@ -196,19 +185,19 @@ function vhost_kill()
 	local vhost_pid="$(cat $vhost_pid_file)"
 	notice "killing vhost (PID $vhost_pid) app"
 
-	if /bin/kill -INT $vhost_pid >/dev/null; then
+	if kill -INT $vhost_pid > /dev/null; then
 		notice "sent SIGINT to vhost app - waiting 60 seconds to exit"
 		for ((i=0; i<60; i++)); do
-			if /bin/kill -0 $vhost_pid; then
+			if kill -0 $vhost_pid; then
 				echo "."
 				sleep 1
 			else
 				break
 			fi
 		done
-		if /bin/kill -0 $vhost_pid; then
+		if kill -0 $vhost_pid; then
 			error "ERROR: vhost was NOT killed - sending SIGABRT"
-			/bin/kill -ABRT $vhost_pid
+			kill -ABRT $vhost_pid
 			rm $vhost_pid_file
 			rc=1
 		else
@@ -216,11 +205,11 @@ function vhost_kill()
 				echo "."
 			done
 		fi
-	elif /bin/kill -0 $vhost_pid; then
+	elif kill -0 $vhost_pid; then
 		error "vhost NOT killed - you need to kill it manually"
 		rc=1
 	else
-		notice "vhost was no running"
+		notice "vhost was not running"
 	fi
 
 	timing_exit vhost_kill
@@ -228,19 +217,22 @@ function vhost_kill()
 		rm $vhost_pid_file
 	fi
 
+	rm -rf "$vhost_dir"
+
 	return $rc
 }
 
 function vhost_rpc
 {
-	local vhost_num=0
-	if [[ ! -z "$1" ]]; then
-		vhost_num=$1
-		assert_number "$vhost_num"
+	local vhost_name="$1"
+
+	if [[ -z "$vhost_name" ]]; then
+		error "vhost name must be provided to vhost_rpc"
+		return 1
 	fi
 	shift
 
-	$rootdir/scripts/rpc.py -s $(get_vhost_dir $vhost_num)/rpc.sock $@
+	$rootdir/scripts/rpc.py -s $(get_vhost_dir $vhost_name)/rpc.sock $@
 }
 
 ###
@@ -292,7 +284,7 @@ function vm_num_is_valid()
 function vm_ssh_socket()
 {
 	vm_num_is_valid $1 || return 1
-	local vm_dir="$VM_BASE_DIR/$1"
+	local vm_dir="$VM_DIR/$1"
 
 	cat $vm_dir/ssh_socket
 }
@@ -300,7 +292,7 @@ function vm_ssh_socket()
 function vm_fio_socket()
 {
 	vm_num_is_valid $1 || return 1
-	local vm_dir="$VM_BASE_DIR/$1"
+	local vm_dir="$VM_DIR/$1"
 
 	cat $vm_dir/fio_socket
 }
@@ -315,7 +307,7 @@ function vm_exec()
 	local vm_num="$1"
 	shift
 
-	sshpass -p root ssh \
+	sshpass -p "$VM_PASSWORD" ssh \
 		-o UserKnownHostsFile=/dev/null \
 		-o StrictHostKeyChecking=no \
 		-o User=root \
@@ -333,7 +325,7 @@ function vm_scp()
 	local vm_num="$1"
 	shift
 
-	sshpass -p root scp \
+	sshpass -p "$VM_PASSWORD" scp \
 		-o UserKnownHostsFile=/dev/null \
 		-o StrictHostKeyChecking=no \
 		-o User=root \
@@ -347,7 +339,7 @@ function vm_scp()
 function vm_is_running()
 {
 	vm_num_is_valid $1 || return 1
-	local vm_dir="$VM_BASE_DIR/$1"
+	local vm_dir="$VM_DIR/$1"
 
 	if [[ ! -r $vm_dir/qemu.pid ]]; then
 		return 1
@@ -374,7 +366,7 @@ function vm_is_running()
 function vm_os_booted()
 {
 	vm_num_is_valid $1 || return 1
-	local vm_dir="$VM_BASE_DIR/$1"
+	local vm_dir="$VM_DIR/$1"
 
 	if [[ ! -r $vm_dir/qemu.pid ]]; then
 		error "VM $1 is not running"
@@ -397,7 +389,7 @@ function vm_os_booted()
 function vm_shutdown()
 {
 	vm_num_is_valid $1 || return 1
-	local vm_dir="$VM_BASE_DIR/$1"
+	local vm_dir="$VM_DIR/$1"
 	if [[ ! -d "$vm_dir" ]]; then
 		error "VM$1 ($vm_dir) not exist - setup it first"
 		return 1
@@ -423,7 +415,7 @@ function vm_shutdown()
 function vm_kill()
 {
 	vm_num_is_valid $1 || return 1
-	local vm_dir="$VM_BASE_DIR/$1"
+	local vm_dir="$VM_DIR/$1"
 
 	if [[ ! -r $vm_dir/qemu.pid ]]; then
 		return 0
@@ -443,17 +435,17 @@ function vm_kill()
 	fi
 }
 
-# List all VM numbers in VM_BASE_DIR
+# List all VM numbers in VM_DIR
 #
 function vm_list_all()
 {
-	local vms="$(shopt -s nullglob; echo $VM_BASE_DIR/[0-9]*)"
-	if [[ ! -z "$vms" ]]; then
+	local vms="$(shopt -s nullglob; echo $VM_DIR/[0-9]*)"
+	if [[ -n "$vms" ]]; then
 		basename --multiple $vms
 	fi
 }
 
-# Kills all VM in $VM_BASE_DIR
+# Kills all VM in $VM_DIR
 #
 function vm_kill_all()
 {
@@ -462,10 +454,10 @@ function vm_kill_all()
 		vm_kill $vm
 	done
 
-	rm -rf $VM_BASE_DIR
+	rm -rf $VM_DIR
 }
 
-# Shutdown all VM in $VM_BASE_DIR
+# Shutdown all VM in $VM_DIR
 #
 function vm_shutdown_all()
 {
@@ -501,7 +493,7 @@ function vm_shutdown_all()
 		sleep 1
 	done
 
-	rm -rf $VM_BASE_DIR
+	rm -rf $VM_DIR
 
 	$shell_restore_x
 	error "Timeout waiting for some VMs to shutdown"
@@ -525,7 +517,7 @@ function vm_setup()
 	local force_vm=""
 	local guest_memory=1024
 	local queue_number=""
-	local vhost_dir="$(get_vhost_dir)"
+	local vhost_dir="$(get_vhost_dir 0)"
 	while getopts ':-:' optchar; do
 		case "$optchar" in
 			-)
@@ -542,7 +534,7 @@ function vm_setup()
 				queue_num=*) local queue_number=${OPTARG#*=} ;;
 				incoming=*) local vm_incoming="${OPTARG#*=}" ;;
 				migrate-to=*) local vm_migrate_to="${OPTARG#*=}" ;;
-				vhost-num=*) local vhost_dir="$(get_vhost_dir ${OPTARG#*=})" ;;
+				vhost-name=*) local vhost_dir="$(get_vhost_dir ${OPTARG#*=})" ;;
 				spdk-boot=*) local boot_from="${OPTARG#*=}" ;;
 				*)
 					error "unknown argument $OPTARG"
@@ -557,18 +549,18 @@ function vm_setup()
 	done
 
 	# Find next directory we can use
-	if [[ ! -z $force_vm ]]; then
+	if [[ -n $force_vm ]]; then
 		vm_num=$force_vm
 
 		vm_num_is_valid $vm_num || return 1
-		local vm_dir="$VM_BASE_DIR/$vm_num"
+		local vm_dir="$VM_DIR/$vm_num"
 		[[ -d $vm_dir ]] && warning "removing existing VM in '$vm_dir'"
 	else
 		local vm_dir=""
 
 		set +x
 		for (( i=0; i<=256; i++)); do
-			local vm_dir="$VM_BASE_DIR/$i"
+			local vm_dir="$VM_DIR/$i"
 			[[ ! -d $vm_dir ]] && break
 		done
 		$shell_restore_x
@@ -581,18 +573,18 @@ function vm_setup()
 		return 1
 	fi
 
-	if [[ ! -z "$vm_migrate_to" && ! -z "$vm_incoming" ]]; then
+	if [[ -n "$vm_migrate_to" && -n "$vm_incoming" ]]; then
 		error "'--incoming' and '--migrate-to' cannot be used together"
 		return 1
-	elif [[ ! -z "$vm_incoming" ]]; then
-		if [[ ! -z "$os_mode" || ! -z "$os_img" ]]; then
+	elif [[ -n "$vm_incoming" ]]; then
+		if [[ -n "$os_mode" || -n "$os_img" ]]; then
 			error "'--incoming' can't be used together with '--os' nor '--os-mode'"
 			return 1
 		fi
 
 		os_mode="original"
-		os="$VM_BASE_DIR/$vm_incoming/os.qcow2"
-	elif [[ ! -z "$vm_migrate_to" ]]; then
+		os="$VM_DIR/$vm_incoming/os.qcow2"
+	elif [[ -n "$vm_migrate_to" ]]; then
 		[[ "$os_mode" != "backing" ]] && warning "Using 'backing' mode for OS since '--migrate-to' is used"
 		os_mode=backing
 	fi
@@ -602,7 +594,7 @@ function vm_setup()
 
 	if [[ "$os_mode" == "backing" ]]; then
 		notice "Creating backing file for OS image file: $os"
-		if ! $QEMU_PREFIX/bin/qemu-img create -f qcow2 -b $os $vm_dir/os.qcow2; then
+		if ! qemu-img create -f qcow2 -b $os $vm_dir/os.qcow2; then
 			error "Failed to create OS backing file in '$vm_dir/os.qcow2' using '$os'"
 			return 1
 		fi
@@ -635,7 +627,7 @@ function vm_setup()
 	local task_mask=${!qemu_mask_param}
 
 	notice "TASK MASK: $task_mask"
-	local cmd="taskset -a -c $task_mask $QEMU_PREFIX/bin/qemu-system-x86_64 ${eol}"
+	local cmd="taskset -a -c $task_mask qemu-system-x86_64 ${eol}"
 	local vm_socket_offset=$(( 10000 + 100 * vm_num ))
 
 	local ssh_socket=$(( vm_socket_offset + 0 ))
@@ -676,7 +668,7 @@ function vm_setup()
 	cmd+="-m $guest_memory --enable-kvm -cpu host -smp $cpu_num -vga std -vnc :$vnc_socket -daemonize ${eol}"
 	cmd+="-object memory-backend-file,id=mem,size=${guest_memory}M,mem-path=/dev/hugepages,share=on,prealloc=yes,host-nodes=$node_num,policy=bind ${eol}"
 	[[ $os_mode == snapshot ]] && cmd+="-snapshot ${eol}"
-	[[ ! -z "$vm_incoming" ]] && cmd+=" -incoming tcp:0:$migration_port ${eol}"
+	[[ -n "$vm_incoming" ]] && cmd+=" -incoming tcp:0:$migration_port ${eol}"
 	cmd+="-monitor telnet:127.0.0.1:$monitor_port,server,nowait ${eol}"
 	cmd+="-numa node,memdev=mem ${eol}"
 	cmd+="-pidfile $qemu_pid_file ${eol}"
@@ -690,7 +682,7 @@ function vm_setup()
 		cmd+="-device ide-hd,drive=os_disk,bootindex=0 ${eol}"
 	fi
 
-	if ( [[ $disks == '' ]] && [[ $disk_type_g == virtio* ]] ); then
+	if [[ $disks == '' ]] && [[ $disk_type_g == virtio* ]]; then
 		disks=1
 	fi
 
@@ -707,13 +699,13 @@ function vm_setup()
 				local raw_name="RAWSCSI"
 				local raw_disk=$vm_dir/test.img
 
-				if [[ ! -z $disk ]]; then
+				if [[ -n $disk ]]; then
 					[[ ! -b $disk ]] && touch $disk
 					local raw_disk=$(readlink -f $disk)
 				fi
 
 				# Create disk file if it not exist or it is smaller than 1G
-				if ( [[ -f $raw_disk ]] && [[ $(stat --printf="%s" $raw_disk) -lt $((1024 * 1024 * 1024)) ]] ) || \
+				if { [[ -f $raw_disk ]] && [[ $(stat --printf="%s" $raw_disk) -lt $((1024 * 1024 * 1024)) ]]; } || \
 					[[ ! -e $raw_disk ]]; then
 					if [[ $raw_disk =~ /dev/.* ]]; then
 						error \
@@ -774,7 +766,7 @@ function vm_setup()
 		return 1
 	fi
 
-	[[ ! -z $qemu_args ]] && cmd+=" $qemu_args ${eol}"
+	[[ -n $qemu_args ]] && cmd+=" $qemu_args ${eol}"
 	# remove last $eol
 	cmd="${cmd%\\\\\\n  }"
 
@@ -816,8 +808,8 @@ function vm_setup()
 	echo $gdbserver_socket > $vm_dir/gdbserver_socket
 	echo $vnc_socket >> $vm_dir/vnc_socket
 
-	[[ -z $vm_incoming ]] || ln -fs $VM_BASE_DIR/$vm_incoming $vm_dir/vm_incoming
-	[[ -z $vm_migrate_to ]] || ln -fs $VM_BASE_DIR/$vm_migrate_to $vm_dir/vm_migrate_to
+	[[ -z $vm_incoming ]] || ln -fs $VM_DIR/$vm_incoming $vm_dir/vm_incoming
+	[[ -z $vm_migrate_to ]] || ln -fs $VM_DIR/$vm_migrate_to $vm_dir/vm_migrate_to
 }
 
 function vm_run()
@@ -842,7 +834,7 @@ function vm_run()
 		shift $((OPTIND-1))
 		for vm in $@; do
 			vm_num_is_valid $1 || return 1
-			if [[ ! -x $VM_BASE_DIR/$vm/run.sh ]]; then
+			if [[ ! -x $VM_DIR/$vm/run.sh ]]; then
 				error "VM$vm not defined - setup it first"
 				return 1
 			fi
@@ -852,12 +844,12 @@ function vm_run()
 
 	for vm in $vms_to_run; do
 		if vm_is_running $vm; then
-			warning "VM$vm ($VM_BASE_DIR/$vm) already running"
+			warning "VM$vm ($VM_DIR/$vm) already running"
 			continue
 		fi
 
-		notice "running $VM_BASE_DIR/$vm/run.sh"
-		if ! $VM_BASE_DIR/$vm/run.sh; then
+		notice "running $VM_DIR/$vm/run.sh"
+		if ! $VM_DIR/$vm/run.sh; then
 			error "FAILED to run vm $vm"
 			return 1
 		fi
@@ -869,22 +861,22 @@ function vm_print_logs()
 	vm_num=$1
 	warning "================"
 	warning "QEMU LOG:"
-	if [[ -r $VM_BASE_DIR/$vm_num/qemu.log ]]; then
-		cat $VM_BASE_DIR/$vm_num/qemu.log
+	if [[ -r $VM_DIR/$vm_num/qemu.log ]]; then
+		cat $VM_DIR/$vm_num/qemu.log
 	else
 		warning "LOG qemu.log not found"
 	fi
 
 	warning "VM LOG:"
-	if [[ -r $VM_BASE_DIR/$vm_num/serial.log ]]; then
-		cat $VM_BASE_DIR/$vm_num/serial.log
+	if [[ -r $VM_DIR/$vm_num/serial.log ]]; then
+		cat $VM_DIR/$vm_num/serial.log
 	else
 		warning "LOG serial.log not found"
 	fi
 
 	warning "SEABIOS LOG:"
-	if [[ -r $VM_BASE_DIR/$vm_num/seabios.log ]]; then
-		cat $VM_BASE_DIR/$vm_num/seabios.log
+	if [[ -r $VM_DIR/$vm_num/seabios.log ]]; then
+		cat $VM_DIR/$vm_num/seabios.log
 	else
 		warning "LOG seabios.log not found"
 	fi
@@ -907,12 +899,12 @@ function vm_wait_for_boot()
 
 	notice "Waiting for VMs to boot"
 	shift
-	if [[ "$@" == "" ]]; then
-		local vms_to_check="$VM_BASE_DIR/[0-9]*"
+	if [[ "$*" == "" ]]; then
+		local vms_to_check="$VM_DIR/[0-9]*"
 	else
 		local vms_to_check=""
 		for vm in $@; do
-			vms_to_check+=" $VM_BASE_DIR/$vm"
+			vms_to_check+=" $VM_DIR/$vm"
 		done
 	fi
 
@@ -988,13 +980,13 @@ function vm_start_fio_server()
 function vm_check_scsi_location()
 {
 	# Script to find wanted disc
-	local script='shopt -s nullglob; \
-	for entry in /sys/block/sd*; do \
-		disk_type="$(cat $entry/device/vendor)"; \
-		if [[ $disk_type == INTEL* ]] || [[ $disk_type == RAWSCSI* ]] || [[ $disk_type == LIO-ORG* ]]; then \
-			fname=$(basename $entry); \
-			echo -n " $fname"; \
-		fi; \
+	local script='shopt -s nullglob;
+	for entry in /sys/block/sd*; do
+		disk_type="$(cat $entry/device/vendor)";
+		if [[ $disk_type == INTEL* ]] || [[ $disk_type == RAWSCSI* ]] || [[ $disk_type == LIO-ORG* ]]; then
+			fname=$(basename $entry);
+			echo -n " $fname";
+		fi;
 	done'
 
 	SCSI_DISK="$(echo "$script" | vm_exec $1 bash -s)"
@@ -1056,7 +1048,7 @@ function run_fio()
 		esac
 	done
 
-	if [[ ! -z "$fio_bin" && ! -r "$fio_bin" ]]; then
+	if [[ -n "$fio_bin" && ! -r "$fio_bin" ]]; then
 		error "FIO binary '$fio_bin' does not exist"
 		return 1
 	fi
@@ -1077,7 +1069,7 @@ function run_fio()
 
 		vm_exec $vm_num cat /root/$job_fname
 		if ! $run_server_mode; then
-			if [[ ! -z "$fio_bin" ]]; then
+			if [[ -n "$fio_bin" ]]; then
 				cat $fio_bin | vm_exec $vm_num 'cat > /root/fio; chmod +x /root/fio'
 			fi
 
@@ -1093,7 +1085,7 @@ function run_fio()
 	fi
 
 	$rootdir/test/vhost/common/run_fio.py --job-file=/root/$job_fname \
-		$([[ ! -z "$fio_bin" ]] && echo "--fio-bin=$fio_bin") \
+		$([[ -n "$fio_bin" ]] && echo "--fio-bin=$fio_bin") \
 		--out=$out $json ${fio_disks%,}
 }
 
@@ -1101,7 +1093,7 @@ function run_fio()
 #
 function at_app_exit()
 {
-	local vhost_num
+	local vhost_name
 
 	notice "APP EXITING"
 	notice "killing all VMs"
@@ -1109,8 +1101,8 @@ function at_app_exit()
 	# Kill vhost application
 	notice "killing vhost app"
 
-	for vhost_num in $(vhost_list_all); do
-		vhost_kill $vhost_num
+	for vhost_name in $(ls $TARGET_DIR); do
+		vhost_kill $vhost_name
 	done
 
 	notice "EXIT DONE"

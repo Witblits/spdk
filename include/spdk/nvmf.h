@@ -2,7 +2,7 @@
  *   BSD LICENSE
  *
  *   Copyright (c) Intel Corporation. All rights reserved.
- *   Copyright (c) 2018 Mellanox Technologies LTD. All rights reserved.
+ *   Copyright (c) 2018-2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -50,6 +50,8 @@
 extern "C" {
 #endif
 
+#define NVMF_TGT_NAME_MAX_LENGTH	256
+
 struct spdk_nvmf_tgt;
 struct spdk_nvmf_subsystem;
 struct spdk_nvmf_ctrlr;
@@ -62,6 +64,11 @@ struct spdk_nvmf_listener;
 struct spdk_nvmf_poll_group;
 struct spdk_json_write_ctx;
 struct spdk_nvmf_transport;
+
+struct spdk_nvmf_target_opts {
+	char		name[NVMF_TGT_NAME_MAX_LENGTH];
+	uint32_t	max_subsystems;
+};
 
 struct spdk_nvmf_transport_opts {
 	uint16_t	max_queue_depth;
@@ -76,16 +83,45 @@ struct spdk_nvmf_transport_opts {
 	bool		no_srq;
 	bool		c2h_success;
 	bool		dif_insert_or_strip;
+	uint32_t	sock_priority;
+};
+
+struct spdk_nvmf_poll_group_stat {
+	uint32_t admin_qpairs;
+	uint32_t io_qpairs;
+	uint64_t pending_bdev_io;
+};
+
+struct spdk_nvmf_rdma_device_stat {
+	const char *name;
+	uint64_t polls;
+	uint64_t completions;
+	uint64_t requests;
+	uint64_t request_latency;
+	uint64_t pending_free_request;
+	uint64_t pending_rdma_read;
+	uint64_t pending_rdma_write;
+};
+
+struct spdk_nvmf_transport_poll_group_stat {
+	spdk_nvme_transport_type_t trtype;
+	union {
+		struct {
+			uint64_t pending_data_buffer;
+			uint64_t num_devices;
+			struct spdk_nvmf_rdma_device_stat *devices;
+		} rdma;
+	};
 };
 
 /**
  * Construct an NVMe-oF target.
  *
- * \param max_subsystems the maximum number of subsystems allowed by the target.
+ * \param opts a pointer to an spdk_nvmf_target_opts structure.
  *
  * \return a pointer to a NVMe-oF target on success, or NULL on failure.
  */
-struct spdk_nvmf_tgt *spdk_nvmf_tgt_create(uint32_t max_subsystems);
+struct spdk_nvmf_tgt *spdk_nvmf_tgt_create(struct spdk_nvmf_target_opts *opts);
 
 typedef void (spdk_nvmf_tgt_destroy_done_fn)(void *ctx, int status);
 
@@ -99,6 +135,49 @@ typedef void (spdk_nvmf_tgt_destroy_done_fn)(void *ctx, int status);
 void spdk_nvmf_tgt_destroy(struct spdk_nvmf_tgt *tgt,
 			   spdk_nvmf_tgt_destroy_done_fn cb_fn,
 			   void *cb_arg);
+
+/**
+ * Get the name of an NVMe-oF target.
+ *
+ * \param tgt The target from which to get the name.
+ *
+ * \return The name of the target as a null terminated string.
+ */
+const char *spdk_nvmf_tgt_get_name(struct spdk_nvmf_tgt *tgt);
+
+/**
+ * Get a pointer to an NVMe-oF target.
+ *
+ * In order to support some legacy applications and RPC methods that may rely on the
+ * concept that there is only one target, the name parameter can be passed as NULL.
+ * If there is only one available target, that target will be returned.
+ * Otherwise, name is a required parameter.
+ *
+ * \param name The name provided when the target was created.
+ *
+ * \return The target with the given name, or NULL if no match was found.
+ */
+struct spdk_nvmf_tgt *spdk_nvmf_get_tgt(const char *name);
+
+/**
+ * Get the pointer to the first NVMe-oF target.
+ *
+ * Combined with spdk_nvmf_get_next_tgt to iterate over all available targets.
+ *
+ * \return The first NVMe-oF target.
+ */
+struct spdk_nvmf_tgt *spdk_nvmf_get_first_tgt(void);
+
+/**
+ * Get the pointer to the first NVMe-oF target.
+ *
+ * Combined with spdk_nvmf_get_first_tgt to iterate over all available targets.
+ *
+ * \param prev A pointer to the last NVMe-oF target.
+ *
+ * \return The first NVMe-oF target.
+ */
+struct spdk_nvmf_tgt *spdk_nvmf_get_next_tgt(struct spdk_nvmf_tgt *prev);
 
 /**
  * Write NVMe-oF target configuration into provided JSON context.
@@ -189,6 +268,18 @@ void spdk_nvmf_poll_group_destroy(struct spdk_nvmf_poll_group *group);
  */
 int spdk_nvmf_poll_group_add(struct spdk_nvmf_poll_group *group,
 			     struct spdk_nvmf_qpair *qpair);
+
+/**
+ * Get current poll group statistics.
+ *
+ * \param tgt The NVMf target.
+ * \param stat Pointer to allocated statistics structure to fill with values.
+ *
+ * \return 0 upon success.
+ * \return -EINVAL if either group or stat is NULL.
+ */
+int spdk_nvmf_poll_group_get_stat(struct spdk_nvmf_tgt *tgt,
+				  struct spdk_nvmf_poll_group_stat *stat);
 
 typedef void (*nvmf_qpair_disconnect_cb)(void *ctx);
 
@@ -588,13 +679,10 @@ uint32_t spdk_nvmf_subsystem_add_ns(struct spdk_nvmf_subsystem *subsystem, struc
  *
  * \param subsystem Subsystem the namespace belong to.
  * \param nsid Namespace ID to be removed.
- * \param cb_fn Function to call when all thread local ns information has been updated
- * \param cb_arg Context for the above cb_fn
  *
  * \return 0 on success, -1 on failure.
  */
-int spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid,
-				  spdk_nvmf_subsystem_state_change_done cb_fn, void *cb_arg);
+int spdk_nvmf_subsystem_remove_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid);
 
 /**
  * Get the first allocated namespace in a subsystem.
@@ -850,7 +938,40 @@ int spdk_nvmf_transport_listen(struct spdk_nvmf_transport *transport,
 void
 spdk_nvmf_tgt_transport_write_config_json(struct spdk_json_write_ctx *w, struct spdk_nvmf_tgt *tgt);
 
-#ifdef SPDK_CONFIG_RDMA
+
+/**
+ * \brief Get current transport poll group statistics.
+ *
+ * This function allocates memory for statistics and returns it
+ * in \p stat parameter. Caller must free this memory with
+ * spdk_nvmf_transport_poll_group_free_stat() when it is not needed
+ * anymore.
+ *
+ * \param tgt The NVMf target.
+ * \param transport The NVMf transport.
+ * \param stat Output parameter that will contain pointer to allocated statistics structure.
+ *
+ * \return 0 upon success.
+ * \return -ENOTSUP if transport does not support statistics.
+ * \return -EINVAL if any of parameters is NULL.
+ * \return -ENOENT if transport poll group is not found.
+ * \return -ENOMEM if memory allocation failed.
+ */
+int
+spdk_nvmf_transport_poll_group_get_stat(struct spdk_nvmf_tgt *tgt,
+					struct spdk_nvmf_transport *transport,
+					struct spdk_nvmf_transport_poll_group_stat **stat);
+
+/**
+ * Free statistics memory previously allocated with spdk_nvmf_transport_poll_group_get_stat().
+ *
+ * \param transport The NVMf transport.
+ * \param stat Pointer to transport poll group statistics structure.
+ */
+void
+spdk_nvmf_transport_poll_group_free_stat(struct spdk_nvmf_transport *transport,
+		struct spdk_nvmf_transport_poll_group_stat *stat);
+
 /**
  * \brief Set the global hooks for the RDMA transport, if necessary.
  *
@@ -863,9 +984,7 @@ spdk_nvmf_tgt_transport_write_config_json(struct spdk_json_write_ctx *w, struct 
  *
  * \param hooks for initializing global hooks
  */
-void
-spdk_nvmf_rdma_init_hooks(struct spdk_nvme_rdma_hooks *hooks);
-#endif
+void spdk_nvmf_rdma_init_hooks(struct spdk_nvme_rdma_hooks *hooks);
 
 #ifdef __cplusplus
 }

@@ -351,7 +351,7 @@ static void
 unregister_and_close(void)
 {
 	bool done, remove_notify;
-	struct spdk_bdev_desc *desc;
+	struct spdk_bdev_desc *desc = NULL;
 
 	setup_test();
 	set_thread(0);
@@ -381,6 +381,7 @@ unregister_and_close(void)
 
 	spdk_bdev_close(desc);
 	poll_threads();
+	desc = NULL;
 
 	/* The unregister should have completed */
 	CU_ASSERT(done == true);
@@ -1498,7 +1499,7 @@ bdev_histograms_mt(void)
 	CU_ASSERT(g_status == 0);
 	CU_ASSERT(g_bdev.bdev.internal.histogram_enabled == false);
 
-	spdk_histogram_data_free(g_histogram);
+	spdk_histogram_data_free(histogram);
 
 	/* Tear down the channels */
 	set_thread(0);

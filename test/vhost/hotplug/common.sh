@@ -18,7 +18,7 @@ blk_hot_remove_test=0
 
 
 function usage() {
-    [[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+    [[ -n $2 ]] && ( echo "$2"; echo ""; )
     echo "Shortcut script for doing automated hotattach/hotdetach test"
     echo "Usage: $(basename $1) [OPTIONS]"
     echo
@@ -65,7 +65,7 @@ fio_job=$testdir/fio_jobs/default_integrity.job
 tmp_attach_job=$testdir/fio_jobs/fio_attach.job.tmp
 tmp_detach_job=$testdir/fio_jobs/fio_detach.job.tmp
 
-rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir)/rpc.sock"
+rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
 
 function print_test_fio_header() {
     notice "==============="
@@ -113,7 +113,7 @@ function vms_setup_and_run() {
 
 function vms_prepare() {
     for vm_num in $1; do
-        vm_dir=$VM_BASE_DIR/$vm_num
+        vm_dir=$VM_DIR/$vm_num
 
         qemu_mask_param="VM_${vm_num}_qemu_mask"
 
@@ -181,7 +181,7 @@ function reboot_all_and_prepare() {
 
 function post_test_case() {
     vm_shutdown_all
-    vhost_kill
+    vhost_kill 0
 }
 
 function on_error_exit() {
@@ -219,5 +219,5 @@ function delete_nvme() {
 }
 
 function add_nvme() {
-    $rpc_py construct_nvme_bdev -b $1 -t PCIe -a $2
+    $rpc_py bdev_nvme_attach_controller -b $1 -t PCIe -a $2
 }

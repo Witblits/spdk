@@ -28,6 +28,7 @@ CONF="librxe,iscsi,rocksdb,fio,flamegraph,tsocks,qemu,vpp,libiscsi,nvmecli,qat,o
 LIBRXE_INSTALL=true
 
 OSID=$(source /etc/os-release && echo $ID)
+OSVERSION=$(source /etc/os-release && echo $VERSION_ID)
 PACKAGEMNG='undefined'
 
 function install_rxe_cfg()
@@ -149,6 +150,14 @@ function install_fio()
     if echo $CONF | grep -q fio; then
         # This version of fio is installed in /usr/src/fio to enable
         # building the spdk fio plugin.
+        local fio_version="fio-3.3"
+
+        # Change version on Arch Linux, 3.3 does not compile
+        # with gcc 9
+        if [ $PACKAGEMNG == 'pacman' ]; then
+            fio_version="fio-3.15"
+        fi
+
         if [ ! -d /usr/src/fio ]; then
             if [ ! -d fio ]; then
                 git clone "${GIT_REPO_FIO}"
@@ -159,7 +168,7 @@ function install_fio()
             (
                 git -C /usr/src/fio checkout master &&
                 git -C /usr/src/fio pull &&
-                git -C /usr/src/fio checkout fio-3.3 &&
+                git -C /usr/src/fio checkout $fio_version &&
                 make -C /usr/src/fio -j${jobs} &&
                 sudo make -C /usr/src/fio install
             )
@@ -186,7 +195,20 @@ function install_flamegraph()
 function install_qemu()
 {
     if echo $CONF | grep -q qemu; then
-        # Qemu is used in the vhost tests.
+        # Two versions of QEMU are used in the tests.
+        # Stock QEMU is used for vhost. A special fork
+        # is used to test OCSSDs. Install both.
+
+        # Packaged QEMU
+        if [ "$PACKAGEMNG" = "dnf" ]; then
+                sudo dnf install -y qemu-system-x86 qemu-img
+        elif [ "$PACKAGEMNG" = "apt-get" ]; then
+                sudo apt-get install -y qemu-system-x86 qemu-img
+        elif [ "$PACKAGEMNG" = "pacman" ]; then
+                sudo pacman -Sy --needed --noconfirm qemu
+        fi
+
+        # Forked QEMU
         SPDK_QEMU_BRANCH=spdk-3.0.0
         mkdir -p qemu
         if [ ! -d "qemu/$SPDK_QEMU_BRANCH" ]; then
@@ -196,12 +218,17 @@ function install_qemu()
         fi
 
         declare -a opt_params=("--prefix=/usr/local/qemu/$SPDK_QEMU_BRANCH")
+        if [ "$PACKAGEMNG" = "pacman" ]; then
+            # GCC 9 on ArchLinux fails to compile Qemu due to some old warnings which were not detected by older versions.
+            opt_params+=("--extra-cflags='-Wno-error=stringop-truncation -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types -Wno-error=format-truncation'")
+            opt_params+=("--disable-glusterfs")
+        fi
 
         # Most tsocks proxies rely on a configuration file in /etc/tsocks.conf.
         # If using tsocks, please make sure to complete this config before trying to build qemu.
         if echo $CONF | grep -q tsocks; then
             if hash tsocks 2> /dev/null; then
-                opt_params+=(--with-git='tsocks git')
+                opt_params+=("--with-git='tsocks git'")
             fi
         fi
 
@@ -225,25 +252,23 @@ function install_vpp()
             fi
         else
             git clone "${GIT_REPO_VPP}"
-            git -C ./vpp checkout v19.01.1
-            git -C ./vpp cherry-pick 97dcf5bd26ca6de580943f5d39681f0144782c3d
-            git -C ./vpp cherry-pick f5dc9fbf814865b31b52b20f5bf959e9ff818b25
+            git -C ./vpp checkout v19.04.2
 
-            # Following patch for VPP is required due to the VPP tries to close
-            # connections to the non existing applications after timeout.
-            # It causes intermittent VPP application segfaults in our tests
-            # when few instances of VPP clients connects and disconnects several
-            # times.
-            # This workaround is only for VPP v19.01.1 and should be solved in
-            # the next release.
-            git -C ./vpp apply ${VM_SETUP_PATH}/patch/vpp/workaround-dont-notify-transport-closing.patch
+            if [ "${OSID}" == 'fedora' ]; then
+                if [ ${OSVERSION} -eq 29 ]; then
+                    git -C ./vpp apply ${VM_SETUP_PATH}/patch/vpp/fedora29-fix.patch
+                fi
+                if [ ${OSVERSION} -eq 30 ]; then
+                    git -C ./vpp apply ${VM_SETUP_PATH}/patch/vpp/fedora30-fix.patch
+                fi
+            fi
 
             # Installing required dependencies for building VPP
             yes | make -C ./vpp install-dep
 
             make -C ./vpp build -j${jobs}
 
-            sudo mv ./vpp /usr/local/src/
+            sudo mv ./vpp /usr/local/src/vpp-19.04
         fi
     fi
 }
@@ -309,6 +334,8 @@ if hash dnf &>/dev/null; then
     PACKAGEMNG=dnf
 elif hash apt-get &>/dev/null; then
     PACKAGEMNG=apt-get
+elif hash pacman &>/dev/null; then
+    PACKAGEMNG=pacman
 else
     echo 'Supported package manager not found. Script supports "dnf" and "apt-get".'
 fi
@@ -344,7 +371,7 @@ while getopts 'iuht:c:-:' optchar; do
     esac
 done
 
-if [ ! -z "$CONF_PATH" ]; then
+if [ -n "$CONF_PATH" ]; then
     if [ ! -f "$CONF_PATH" ]; then
         echo Configuration file does not exist: "$CONF_PATH"
         exit 1
@@ -367,20 +394,28 @@ cd ~
 : ${GIT_REPO_LIBISCSI=https://github.com/sahlberg/libiscsi}; export GIT_REPO_LIBISCSI
 : ${GIT_REPO_SPDK_NVME_CLI=https://github.com/spdk/nvme-cli}; export GIT_REPO_SPDK_NVME_CLI
 : ${GIT_REPO_INTEL_IPSEC_MB=https://github.com/spdk/intel-ipsec-mb.git}; export GIT_REPO_INTEL_IPSEC_MB
-: ${DRIVER_LOCATION_QAT=https://01.org/sites/default/files/downloads/intelr-quickassist-technology/qat1.7.l.4.3.0-00033.tar.gz}; export DRIVER_LOCATION_QAT
+: ${DRIVER_LOCATION_QAT=https://01.org/sites/default/files/downloads//qat1.7.l.4.6.0-00025.tar.gz}; export DRIVER_LOCATION_QAT
 : ${GIT_REPO_OCF=https://github.com/Open-CAS/ocf}; export GIT_REPO_OCF
 
 jobs=$(($(nproc)*2))
 
 if $UPGRADE; then
-    if [ $PACKAGEMNG == 'apt-get' ]; then
+    if [ $PACKAGEMNG == 'dnf' ]; then
+        sudo $PACKAGEMNG upgrade -y
+    elif [ $PACKAGEMNG == 'apt-get' ]; then
         sudo $PACKAGEMNG update
+        sudo $PACKAGEMNG upgrade -y
+    elif [ $PACKAGEMNG == 'pacman' ]; then
+        sudo $PACKAGEMNG -Syu --noconfirm --needed
     fi
-    sudo $PACKAGEMNG upgrade -y
 fi
 
 if $INSTALL; then
-    sudo $PACKAGEMNG install -y git
+    if [ $PACKAGEMNG == 'pacman' ]; then
+        sudo $PACKAGEMNG -Sy --needed --noconfirm git
+    else
+        sudo $PACKAGEMNG install -y git
+    fi
 fi
 
 mkdir -p spdk_repo/output
@@ -515,6 +550,52 @@ if $INSTALL; then
 
         # rpm-build is not used
         # iptables installed by default
+
+    elif [ $PACKAGEMNG == 'pacman' ]; then
+        if echo $CONF | grep -q tsocks; then
+            sudo pacman -Sy --noconfirm --needed tsocks
+        fi
+
+        sudo pacman -Sy --noconfirm --needed valgrind \
+            jq \
+            nvme-cli \
+            ceph \
+            gdb \
+            fio \
+            linux-headers \
+            gflags \
+            autoconf \
+            automake \
+            libtool \
+            libutil-linux \
+            libiscsi \
+            open-isns \
+            glib2 \
+            pixman \
+            flex \
+            bison \
+            elfutils \
+            libelf \
+            astyle \
+            gptfdisk \
+            socat \
+            sshfs \
+            sshpass \
+            python-pandas \
+            btrfs-progs \
+            iptables \
+            clang \
+            bc \
+            perl-switch \
+            open-iscsi
+
+        # TODO:
+        # These are either missing or require some other installation method
+        # than pacman:
+
+        # librbd-devel
+        # perl-open
+        # targetcli
 
     else
         echo "Package manager is undefined, skipping INSTALL step"

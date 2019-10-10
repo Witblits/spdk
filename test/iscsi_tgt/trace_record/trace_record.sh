@@ -44,7 +44,7 @@ $ISCSI_APP -m 0xf --num-trace-entries $NUM_TRACE_ENTRIES --tpoint-group-mask 0xf
 iscsi_pid=$!
 echo "Process pid: $iscsi_pid"
 
-trap "killprocess $iscsi_pid; iscsitestfini $1 $2; exit 1" SIGINT SIGTERM EXIT
+trap 'killprocess $iscsi_pid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
 
 waitforlisten $iscsi_pid
 
@@ -52,15 +52,20 @@ echo "iscsi_tgt is listening. Running tests..."
 
 timing_exit start_iscsi_tgt
 
+mkdir -p ${TRACE_TMP_FOLDER}
+./app/trace_record/spdk_trace_record -s iscsi -p ${iscsi_pid} -f ${TRACE_RECORD_OUTPUT} -q 1>${TRACE_RECORD_NOTICE_LOG} &
+record_pid=$!
+echo "Trace record pid: $record_pid"
+
 RPCS=
-RPCS+="add_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT\n"
-RPCS+="add_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK\n"
+RPCS+="iscsi_create_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT\n"
+RPCS+="iscsi_create_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK\n"
 
 echo "Create bdevs and target nodes"
 CONNECTION_NUMBER=15
 for i in $(seq 0 $CONNECTION_NUMBER); do
-	RPCS+="construct_malloc_bdev $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE -b Malloc$i\n"
-	RPCS+="construct_target_node Target$i Target${i}_alias "Malloc$i:0" $PORTAL_TAG:$INITIATOR_TAG 256 -d\n"
+	RPCS+="bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE -b Malloc$i\n"
+	RPCS+="iscsi_create_target_node Target$i Target${i}_alias "Malloc$i:0" $PORTAL_TAG:$INITIATOR_TAG 256 -d\n"
 done
 echo -e $RPCS | $rpc_py
 
@@ -70,12 +75,7 @@ iscsiadm -m discovery -t sendtargets -p $TARGET_IP:$ISCSI_PORT
 iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
 waitforiscsidevices $(( $CONNECTION_NUMBER + 1 ))
 
-mkdir -p ${TRACE_TMP_FOLDER}
-./app/trace_record/spdk_trace_record -s iscsi -p ${iscsi_pid} -f ${TRACE_RECORD_OUTPUT} -q 1>${TRACE_RECORD_NOTICE_LOG} &
-record_pid=$!
-echo "Trace record pid: $record_pid"
-
-trap "iscsicleanup; killprocess $iscsi_pid; killprocess $record_pid; delete_tmp_files; iscsitestfini $1 $2; exit 1" SIGINT SIGTERM EXIT
+trap 'iscsicleanup; killprocess $iscsi_pid; killprocess $record_pid; delete_tmp_files; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
 
 echo "Running FIO"
 $fio_py -p iscsi -i 131072 -d 32 -t randrw -r 1
@@ -85,12 +85,12 @@ iscsicleanup
 RPCS=
 # Delete Malloc blockdevs and targets
 for i in $(seq 0 $CONNECTION_NUMBER); do
-	RPCS+="delete_target_node iqn.2016-06.io.spdk:Target$i\n"
-	RPCS+="delete_malloc_bdev Malloc$i\n"
+	RPCS+="iscsi_delete_target_node iqn.2016-06.io.spdk:Target$i\n"
+	RPCS+="bdev_malloc_delete Malloc$i\n"
 done
 echo -e $RPCS | $rpc_py
 
-trap "delete_tmp_files; iscsitestfini $1 $2; exit 1" SIGINT SIGTERM EXIT
+trap 'delete_tmp_files; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
 
 killprocess $iscsi_pid
 killprocess $record_pid

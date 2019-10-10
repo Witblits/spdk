@@ -8,7 +8,7 @@ function error()
 	echo -e "ERROR: $1"
 	echo "error code: $error_code"
 	echo "==========="
-	vhost_kill
+	vhost_kill 0
 	pmem_clean_pool_file
 	return $error_code
 }
@@ -37,7 +37,7 @@ function pmem_create_pool_file()
 
 	pmem_clean_pool_file $pool_file
 	echo "Creating new pool file"
-	if ! $rpc_py create_pmem_pool $pool_file $size $block_size; then
+	if ! $rpc_py bdev_pmem_create_pool $pool_file $size $block_size; then
 		error "Creating pool_file failed!"
 	fi
 
@@ -70,10 +70,6 @@ function vhost_start()
 	local vhost_pid
 
 	$rootdir/app/vhost/vhost &
-	if [ $? != 0 ]; then
-		echo -e "ERROR: Failed to launch vhost!"
-		return 1
-	fi
 
 	vhost_pid=$!
 	echo $vhost_pid > $testdir/vhost.pid

@@ -250,6 +250,12 @@ spdk_ut_sock_get_placement_id(struct spdk_sock *_sock, int *placement_id)
 	return -1;
 }
 
+static int
+spdk_ut_sock_set_priority(struct spdk_sock *_sock, int priority)
+{
+	return 0;
+}
+
 static struct spdk_sock_group_impl *
 spdk_ut_sock_group_impl_create(void)
 {
@@ -304,6 +310,7 @@ spdk_ut_sock_group_impl_close(struct spdk_sock_group_impl *_group)
 	struct spdk_ut_sock_group_impl *group = __ut_group(_group);
 
 	CU_ASSERT(group->sock == NULL);
+	free(_group);
 
 	return 0;
 }
@@ -321,6 +328,7 @@ static struct spdk_net_impl g_ut_net_impl = {
 	.set_recvlowat	= spdk_ut_sock_set_recvlowat,
 	.set_recvbuf	= spdk_ut_sock_set_recvbuf,
 	.set_sendbuf	= spdk_ut_sock_set_sendbuf,
+	.set_priority	= spdk_ut_sock_set_priority,
 	.is_ipv6	= spdk_ut_sock_is_ipv6,
 	.is_ipv4	= spdk_ut_sock_is_ipv4,
 	.get_placement_id	= spdk_ut_sock_get_placement_id,
@@ -503,7 +511,7 @@ _sock_group(const char *ip, int port)
 	g_bytes_read = 0;
 	rc = spdk_sock_group_poll(group);
 
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 1);
 	CU_ASSERT(g_read_data_called == true);
 	CU_ASSERT(g_bytes_read == 7);
 
@@ -614,7 +622,7 @@ posix_sock_group_fairness(void)
 	 */
 	g_server_sock_read = NULL;
 	rc = spdk_sock_group_poll_count(group, 1);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 1);
 	CU_ASSERT(g_server_sock_read == server_sock[0]);
 
 	/*
@@ -629,17 +637,17 @@ posix_sock_group_fairness(void)
 
 	g_server_sock_read = NULL;
 	rc = spdk_sock_group_poll_count(group, 1);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 1);
 	CU_ASSERT(g_server_sock_read == server_sock[1]);
 
 	g_server_sock_read = NULL;
 	rc = spdk_sock_group_poll_count(group, 1);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 1);
 	CU_ASSERT(g_server_sock_read == server_sock[2]);
 
 	g_server_sock_read = NULL;
 	rc = spdk_sock_group_poll_count(group, 1);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 1);
 	CU_ASSERT(g_server_sock_read == server_sock[0]);
 
 	for (i = 0; i < 3; i++) {

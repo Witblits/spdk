@@ -5,27 +5,6 @@ rootdir=$(readlink -f $testdir/../..)
 source $rootdir/scripts/common.sh
 source $rootdir/test/common/autotest_common.sh
 
-function get_nvme_name_from_bdf {
-	blkname=()
-
-	nvme_devs=$(lsblk -d --output NAME | grep "^nvme") || true
-	if [ -z "$nvme_devs" ]; then
-		return
-	fi
-	for dev in $nvme_devs; do
-		link_name=$(readlink /sys/block/$dev/device/device) || true
-		if [ -z "$link_name" ]; then
-			link_name=$(readlink /sys/block/$dev/device)
-		fi
-		bdf=$(basename "$link_name")
-		if [ "$bdf" = "$1" ]; then
-			blkname+=($dev)
-		fi
-	done
-
-	printf '%s\n' "${blkname[@]}"
-}
-
 timing_enter nvme
 
 if [ $(uname) = Linux ]; then
@@ -42,13 +21,12 @@ if [ $(uname) = Linux ]; then
 	# note: more work probably needs to be done to properly handle devices with multiple
 	# namespaces
 	for bdf in $(iter_pci_class_code 01 08 02); do
-		for blkname in $(get_nvme_name_from_bdf $bdf); do
-			if [ "$blkname" != "" ]; then
-				mountpoints=$(lsblk /dev/$blkname --output MOUNTPOINT -n | wc -w)
+		for name in $(get_nvme_name_from_bdf $bdf); do
+			if [ "$name" != "" ]; then
+				mountpoints=$(lsblk /dev/$name --output MOUNTPOINT -n | wc -w)
 				if [ "$mountpoints" = "0" ]; then
-					break
-				else
-					blkname=''
+					blkname=$name
+					break 2
 				fi
 			fi
 		done
@@ -105,7 +83,9 @@ done
 timing_exit identify
 
 timing_enter perf
-$rootdir/examples/nvme/perf/perf -q 128 -w read -o 12288 -t 1 -LL -i 0
+#enable no shutdown notification option
+$rootdir/examples/nvme/perf/perf -q 128 -w read -o 12288 -t 1 -LL -i 0 -N
+$rootdir/examples/nvme/perf/perf -q 128 -w write -o 12288 -t 1 -LL -i 0
 if [ -b /dev/ram0 ]; then
 	# Test perf with AIO device
 	$rootdir/examples/nvme/perf/perf /dev/ram0 -q 128 -w read -o 12288 -t 1 -LL -i 0

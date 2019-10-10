@@ -114,10 +114,6 @@ done
 
 sync
 
-if [ $(uname -s) = Linux ]; then
-	# Load RAM disk driver if available
-	modprobe brd || true
-fi
 timing_exit cleanup
 
 # set up huge pages
@@ -155,6 +151,8 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 	run_test suite test/env/env.sh
 	run_test suite test/rpc_client/rpc_client.sh
 	run_test suite ./test/json_config/json_config.sh
+	run_test suite test/json_config/alias_rpc/alias_rpc.sh
+	run_test suite test/spdkcli/tcp.sh
 
 	if [ $SPDK_TEST_BLOCKDEV -eq 1 ]; then
 		run_test suite test/bdev/blockdev.sh
@@ -179,10 +177,9 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 		# Only test hotplug without ASAN enabled. Since if it is
 		# enabled, it catches SEGV earlier than our handler which
 		# breaks the hotplug logic.
-		# Temporary workaround for issue #542, annotated for no VM image.
-		#if [ $SPDK_RUN_ASAN -eq 0 ]; then
-		#	run_test suite test/nvme/hotplug.sh intel
-		#fi
+		if [ $SPDK_RUN_ASAN -eq 0 ]; then
+			run_test suite test/nvme/hotplug.sh intel
+		fi
 	fi
 
 	if [ $SPDK_TEST_IOAT -eq 1 ]; then
@@ -206,6 +203,7 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 	if [ $SPDK_TEST_BLOBFS -eq 1 ]; then
 		run_test suite ./test/blobfs/rocksdb/rocksdb.sh
 		run_test suite ./test/blobstore/blobstore.sh
+		run_test suite ./test/blobfs/blobfs.sh
 	fi
 
 	if [ $SPDK_TEST_NVMF -eq 1 ]; then
@@ -249,9 +247,17 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 		run_test suite ./test/ocf/ocf.sh
 	fi
 
-	if [ $SPDK_TEST_BDEV_FTL -eq 1 ]; then
+	if [ $SPDK_TEST_FTL -eq 1 ]; then
 		run_test suite ./test/ftl/ftl.sh
 	fi
+
+	if [ $SPDK_TEST_VMD -eq 1 ]; then
+		run_test suite ./test/vmd/vmd.sh
+	fi
+
+        if [ $SPDK_TEST_REDUCE -eq 1 ]; then
+                run_test suite ./test/compress/compress.sh
+        fi
 fi
 
 timing_enter cleanup

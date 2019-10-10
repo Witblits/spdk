@@ -123,6 +123,12 @@ extern pid_t g_spdk_nvme_pid;
  */
 #define NVME_QUIRK_SHST_COMPLETE 0x200
 
+/*
+ * The controller requires an extra delay before starting the initialization process
+ * during attach.
+ */
+#define NVME_QUIRK_DELAY_BEFORE_INIT 0x400
+
 #define NVME_MAX_ASYNC_EVENTS	(8)
 
 #define NVME_MAX_ADMIN_TIMEOUT_IN_SECS	(30)
@@ -140,6 +146,8 @@ extern pid_t g_spdk_nvme_pid;
 
 #define DEFAULT_ADMIN_QUEUE_REQUESTS	(32)
 #define DEFAULT_IO_QUEUE_REQUESTS	(512)
+
+#define SPDK_NVME_DEFAULT_RETRY_COUNT	(4)
 
 #define MIN_KEEP_ALIVE_TIMEOUT_IN_MS	(10000)
 
@@ -551,7 +559,7 @@ enum nvme_ctrlr_state {
 	NVME_CTRLR_STATE_ERROR
 };
 
-#define NVME_TIMEOUT_INFINITE	UINT64_MAX
+#define NVME_TIMEOUT_INFINITE	0
 
 /*
  * Used to track properties for all processes accessing the controller.
@@ -693,6 +701,10 @@ struct spdk_nvme_ctrlr {
 
 	STAILQ_HEAD(, nvme_request)	queued_aborts;
 	uint32_t			outstanding_aborts;
+
+	/* CB to notify the user when the ctrlr is removed/failed. */
+	spdk_nvme_remove_cb			remove_cb;
+	void					*cb_ctx;
 };
 
 struct spdk_nvme_probe_ctx {
@@ -819,6 +831,7 @@ int	nvme_ctrlr_construct(struct spdk_nvme_ctrlr *ctrlr);
 void	nvme_ctrlr_destruct_finish(struct spdk_nvme_ctrlr *ctrlr);
 void	nvme_ctrlr_destruct(struct spdk_nvme_ctrlr *ctrlr);
 void	nvme_ctrlr_fail(struct spdk_nvme_ctrlr *ctrlr, bool hot_remove);
+int	nvme_ctrlr_reset(struct spdk_nvme_ctrlr *ctrlr);
 int	nvme_ctrlr_process_init(struct spdk_nvme_ctrlr *ctrlr);
 void	nvme_ctrlr_connected(struct spdk_nvme_probe_ctx *probe_ctx,
 			     struct spdk_nvme_ctrlr *ctrlr);
@@ -969,7 +982,78 @@ nvme_qpair_free_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req)
 	STAILQ_INSERT_HEAD(&qpair->free_req, req, stailq);
 }
 
-void	nvme_request_remove_child(struct nvme_request *parent, struct nvme_request *child);
+static inline void
+nvme_request_remove_child(struct nvme_request *parent, struct nvme_request *child)
+{
+	assert(parent != NULL);
+	assert(child != NULL);
+	assert(child->parent == parent);
+	assert(parent->num_children != 0);
+
+	parent->num_children--;
+	TAILQ_REMOVE(&parent->children, child, child_tailq);
+}
+
+static inline void
+nvme_cb_complete_child(void *child_arg, const struct spdk_nvme_cpl *cpl)
+{
+	struct nvme_request *child = child_arg;
+	struct nvme_request *parent = child->parent;
+
+	nvme_request_remove_child(parent, child);
+
+	if (spdk_nvme_cpl_is_error(cpl)) {
+		memcpy(&parent->parent_status, cpl, sizeof(*cpl));
+	}
+
+	if (parent->num_children == 0) {
+		nvme_complete_request(parent->cb_fn, parent->cb_arg, parent->qpair,
+				      parent, &parent->parent_status);
+		nvme_free_request(parent);
+	}
+}
+
+static inline void
+nvme_request_add_child(struct nvme_request *parent, struct nvme_request *child)
+{
+	assert(parent->num_children != UINT16_MAX);
+
+	if (parent->num_children == 0) {
+		/*
+		 * Defer initialization of the children TAILQ since it falls
+		 *  on a separate cacheline.  This ensures we do not touch this
+		 *  cacheline except on request splitting cases, which are
+		 *  relatively rare.
+		 */
+		TAILQ_INIT(&parent->children);
+		parent->parent = NULL;
+		memset(&parent->parent_status, 0, sizeof(struct spdk_nvme_cpl));
+	}
+
+	parent->num_children++;
+	TAILQ_INSERT_TAIL(&parent->children, child, child_tailq);
+	child->parent = parent;
+	child->cb_fn = nvme_cb_complete_child;
+	child->cb_arg = child;
+}
+
+static inline void
+nvme_request_free_children(struct nvme_request *req)
+{
+	struct nvme_request *child, *tmp;
+
+	if (req->num_children == 0) {
+		return;
+	}
+
+	/* free all child nvme_request */
+	TAILQ_FOREACH_SAFE(child, &req->children, child_tailq, tmp) {
+		nvme_request_remove_child(req, child);
+		nvme_request_free_children(child);
+		nvme_free_request(child);
+	}
+}
+
 int	nvme_request_check_timeout(struct nvme_request *req, uint16_t cid,
 				   struct spdk_nvme_ctrlr_process *active_proc, uint64_t now_tick);
 uint64_t nvme_get_quirks(const struct spdk_pci_id *id);
@@ -977,10 +1061,7 @@ uint64_t nvme_get_quirks(const struct spdk_pci_id *id);
 int	nvme_robust_mutex_init_shared(pthread_mutex_t *mtx);
 int	nvme_robust_mutex_init_recursive_shared(pthread_mutex_t *mtx);
 
-const char *spdk_nvme_cpl_get_status_string(const struct spdk_nvme_status *status);
 bool	nvme_completion_is_retry(const struct spdk_nvme_cpl *cpl);
-void	nvme_qpair_print_command(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cmd *cmd);
-void	nvme_qpair_print_completion(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cpl *cpl);
 
 struct spdk_nvme_ctrlr *spdk_nvme_get_ctrlr_by_trid_unsafe(
 	const struct spdk_nvme_transport_id *trid);

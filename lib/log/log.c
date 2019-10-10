@@ -116,6 +116,17 @@ spdk_log(enum spdk_log_level level, const char *file, const int line, const char
 	char buf[MAX_TMPBUF];
 	va_list ap;
 
+	if (g_log) {
+		va_start(ap, format);
+		g_log(level, file, line, func, format, ap);
+		va_end(ap);
+		return;
+	}
+
+	if (level > g_spdk_log_print_level && level > g_spdk_log_level) {
+		return;
+	}
+
 	switch (level) {
 	case SPDK_LOG_ERROR:
 		severity = LOG_ERR;
@@ -134,25 +145,20 @@ spdk_log(enum spdk_log_level level, const char *file, const int line, const char
 		return;
 	}
 
-	if (g_log) {
-		g_log(level, file, line, func, format);
+	va_start(ap, format);
 
-	} else {
-		va_start(ap, format);
+	vsnprintf(buf, sizeof(buf), format, ap);
 
-		vsnprintf(buf, sizeof(buf), format, ap);
-
-		if (level <= g_spdk_log_print_level) {
-			fprintf(stderr, "%s:%4d:%s: *%s*: %s", file, line, func, spdk_level_names[level], buf);
-			spdk_log_unwind_stack(stderr, level);
-		}
-
-		if (level <= g_spdk_log_level) {
-			syslog(severity, "%s:%4d:%s: *%s*: %s", file, line, func, spdk_level_names[level], buf);
-		}
-
-		va_end(ap);
+	if (level <= g_spdk_log_print_level) {
+		fprintf(stderr, "%s:%4d:%s: *%s*: %s", file, line, func, spdk_level_names[level], buf);
+		spdk_log_unwind_stack(stderr, level);
 	}
+
+	if (level <= g_spdk_log_level) {
+		syslog(severity, "%s:%4d:%s: *%s*: %s", file, line, func, spdk_level_names[level], buf);
+	}
+
+	va_end(ap);
 }
 
 static void

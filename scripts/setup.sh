@@ -13,7 +13,7 @@ function usage()
 		options="[config|reset|help]"
 	fi
 
-	[[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+	[[ -n $2 ]] && ( echo "$2"; echo ""; )
 	echo "Helper script for allocating hugepages and binding NVMe, I/OAT, VMD and Virtio devices"
 	echo "to a generic VFIO kernel driver. If VFIO is not available on the system, this script"
 	echo "will fall back to UIO. NVMe and Virtio devices with active mountpoints will be ignored."
@@ -135,6 +135,8 @@ function linux_hugetlbfs_mounts() {
 }
 
 function get_nvme_name_from_bdf {
+	local blknames=()
+
 	set +e
 	nvme_devs=$(lsblk -d --output NAME | grep "^nvme")
 	set -e
@@ -145,10 +147,11 @@ function get_nvme_name_from_bdf {
 		fi
 		link_bdf=$(basename "$link_name")
 		if [ "$link_bdf" = "$1" ]; then
-			eval "$2=$dev"
-			return
+			blknames+=($dev)
 		fi
 	done
+
+	printf '%s\n' "${blknames[@]}"
 }
 
 function get_virtio_names_from_bdf {
@@ -200,21 +203,27 @@ function configure_linux_pci {
 
 	# NVMe
 	for bdf in $(iter_all_pci_class_code 01 08 02); do
-		blkname=''
-		get_nvme_name_from_bdf "$bdf" blkname
+		blknames=()
 		if ! pci_can_use $bdf; then
-			pci_dev_echo "$bdf" "Skipping un-whitelisted NVMe controller $blkname"
+			pci_dev_echo "$bdf" "Skipping un-whitelisted NVMe controller at $bdf"
 			continue
 		fi
-		if [ "$blkname" != "" ]; then
+
+		mount=false
+		for blkname in $(get_nvme_name_from_bdf $bdf); do
 			mountpoints=$(lsblk /dev/$blkname --output MOUNTPOINT -n | wc -w)
-		else
-			mountpoints="0"
-		fi
-		if [ "$mountpoints" = "0" ]; then
+			if [ "$mountpoints" != "0" ]; then
+				mount=true
+				blknames+=($blkname)
+			fi
+		done
+
+		if ! $mount; then
 			linux_bind_driver "$bdf" "$driver_name"
 		else
-			pci_dev_echo "$bdf" "Active mountpoints on /dev/$blkname, so not binding PCI dev"
+			for name in ${blknames[@]}; do
+				pci_dev_echo "$bdf" "Active mountpoints on /dev/$name, so not binding PCI dev"
+			done
 		fi
 	done
 
@@ -248,7 +257,7 @@ function configure_linux_pci {
 				pci_dev_echo "$bdf" "Skipping un-whitelisted Virtio device at $bdf"
 				continue
 			fi
-			blknames=''
+			blknames=()
 			get_virtio_names_from_bdf "$bdf" blknames
 			for blkname in $blknames; do
 				if [ "$(lsblk /dev/$blkname --output MOUNTPOINT -n | wc -w)" != "0" ]; then
@@ -298,7 +307,8 @@ function cleanup_linux {
 	done
 	shopt -u extglob nullglob
 
-	files_to_clean+="$(ls -1 /dev/shm/* | grep -E '(spdk_tgt|iscsi|vhost|nvmf|rocksdb|bdevio|bdevperf)_trace|spdk_iscsi_conns' || true) "
+	files_to_clean+="$(ls -1 /dev/shm/* | \
+	grep -E '(spdk_tgt|iscsi|vhost|nvmf|rocksdb|bdevio|bdevperf|vhost_fuzz|nvme_fuzz)_trace|spdk_iscsi_conns' || true) "
 	files_to_clean="$(readlink -e assert_not_empty $files_to_clean || true)"
 	if [[ -z "$files_to_clean" ]]; then
 		echo "Clean"
@@ -391,6 +401,13 @@ function configure_linux {
 				echo "if run as current user."
 			fi
 		fi
+	fi
+
+	if [ ! -f /dev/cpu/0/msr ]; then
+		# Some distros build msr as a module.  Make sure it's loaded to ensure
+		#  DPDK can easily figure out the TSC rate rather than relying on 100ms
+		#  sleeps.
+		modprobe msr || true
 	fi
 }
 
@@ -584,7 +601,7 @@ function status_linux {
 			fi
 			device=$(cat /sys/bus/pci/devices/$bdf/device)
 			vendor=$(cat /sys/bus/pci/devices/$bdf/vendor)
-			blknames=''
+			blknames=()
 			get_virtio_names_from_bdf "$bdf" blknames
 			echo -e "$bdf\t${vendor#0x}\t${device#0x}\t$node\t\t${driver:--}\t\t$blknames"
 		done

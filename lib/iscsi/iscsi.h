@@ -60,6 +60,8 @@
 #define MAX_INITIATOR 256
 #define MAX_NETMASK 256
 #define MAX_ISCSI_CONNECTIONS 1024
+#define MAX_PORTAL_ADDR 256
+#define MAX_PORTAL_PORT 32
 
 #define DEFAULT_PORT 3260
 #define DEFAULT_MAX_SESSIONS 128
@@ -119,6 +121,11 @@
  * changed by configuration file.
  */
 #define DEFAULT_MAX_QUEUE_DEPTH	64
+
+/** Defines how long we should wait for a logout request when the target
+ *   requests logout to the initiator asynchronously.
+ */
+#define ISCSI_LOGOUT_REQUEST_TIMEOUT 30 /* in seconds */
 
 /** Defines how long we should wait for a TCP close after responding to a
  *   logout request, before terminating the connection ourselves.
@@ -194,9 +201,8 @@ struct spdk_iscsi_pdu {
 enum iscsi_connection_state {
 	ISCSI_CONN_STATE_INVALID = 0,
 	ISCSI_CONN_STATE_RUNNING = 1,
-	ISCSI_CONN_STATE_LOGGED_OUT = 2,
-	ISCSI_CONN_STATE_EXITING = 3,
-	ISCSI_CONN_STATE_EXITED = 4,
+	ISCSI_CONN_STATE_EXITING = 2,
+	ISCSI_CONN_STATE_EXITED = 3,
 };
 
 enum iscsi_chap_phase {
@@ -280,11 +286,11 @@ struct spdk_iscsi_sess {
 };
 
 struct spdk_iscsi_poll_group {
-	uint32_t					core;
 	struct spdk_poller				*poller;
 	struct spdk_poller				*nop_poller;
 	STAILQ_HEAD(connections, spdk_iscsi_conn)	connections;
 	struct spdk_sock_group				*sock_group;
+	TAILQ_ENTRY(spdk_iscsi_poll_group)		link;
 };
 
 struct spdk_iscsi_opts {
@@ -306,7 +312,6 @@ struct spdk_iscsi_opts {
 	bool ImmediateData;
 	uint32_t ErrorRecoveryLevel;
 	bool AllowDuplicateIsid;
-	uint32_t min_connections_per_core; /* Deprecated */
 };
 
 struct spdk_iscsi_globals {
@@ -318,6 +323,7 @@ struct spdk_iscsi_globals {
 	TAILQ_HEAD(, spdk_iscsi_init_grp)	ig_head;
 	TAILQ_HEAD(, spdk_iscsi_tgt_node)	target_head;
 	TAILQ_HEAD(, spdk_iscsi_auth_group)	auth_group_head;
+	TAILQ_HEAD(, spdk_iscsi_poll_group)	poll_group_head;
 
 	int32_t timeout;
 	int32_t nopininterval;
@@ -344,7 +350,6 @@ struct spdk_iscsi_globals {
 	struct spdk_mempool *task_pool;
 
 	struct spdk_iscsi_sess	**session;
-	struct spdk_iscsi_poll_group *poll_group;
 };
 
 #define ISCSI_SECURITY_NEGOTIATION_PHASE	0

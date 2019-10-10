@@ -56,16 +56,21 @@ export RUN_NIGHTLY_FAILING
 : ${SPDK_RUN_ASAN=0}; export SPDK_RUN_ASAN
 : ${SPDK_RUN_UBSAN=0}; export SPDK_RUN_UBSAN
 : ${SPDK_RUN_INSTALLED_DPDK=0}; export SPDK_RUN_INSTALLED_DPDK
+: ${SPDK_RUN_NON_ROOT=0}; export SPDK_RUN_NON_ROOT
 : ${SPDK_TEST_CRYPTO=0}; export SPDK_TEST_CRYPTO
 : ${SPDK_TEST_FTL=0}; export SPDK_TEST_FTL
-: ${SPDK_TEST_BDEV_FTL=0}; export SPDK_TEST_BDEV_FTL
 : ${SPDK_TEST_OCF=0}; export SPDK_TEST_OCF
 : ${SPDK_TEST_FTL_EXTENDED=0}; export SPDK_TEST_FTL_EXTENDED
+: ${SPDK_TEST_VMD=0}; export SPDK_TEST_VMD
 : ${SPDK_AUTOTEST_X=true}; export SPDK_AUTOTEST_X
 
 # Export PYTHONPATH with addition of RPC framework. New scripts can be created
 # specific use cases for tests.
 export PYTHONPATH=$PYTHONPATH:$rootdir/scripts
+
+# Don't create Python .pyc files. When running with sudo these will be
+# created with root ownership and can cause problems when cleaning the repository.
+export PYTHONDONTWRITEBYTECODE=1
 
 # Export flag to skip the known bug that exists in librados
 # Bug is reported on ceph bug tracker with number 24078
@@ -107,7 +112,7 @@ if [ $SPDK_RUN_VALGRIND -eq 0 ]; then
 fi
 
 if [ "$(uname -s)" = "Linux" ]; then
-	MAKE=make
+	MAKE="make"
 	MAKEFLAGS=${MAKEFLAGS:--j$(nproc)}
 	DPDK_LINUX_DIR=/usr/share/dpdk/x86_64-default-linuxapp-gcc
 	if [ -d $DPDK_LINUX_DIR ] && [ $SPDK_RUN_INSTALLED_DPDK -eq 1 ]; then
@@ -116,7 +121,7 @@ if [ "$(uname -s)" = "Linux" ]; then
 	# Override the default HUGEMEM in scripts/setup.sh to allocate 8GB in hugepages.
 	export HUGEMEM=8192
 elif [ "$(uname -s)" = "FreeBSD" ]; then
-	MAKE=gmake
+	MAKE="gmake"
 	MAKEFLAGS=${MAKEFLAGS:--j$(sysctl -a | grep -E -i 'hw.ncpu' | awk '{print $2}')}
 	DPDK_FREEBSD_DIR=/usr/local/share/dpdk/x86_64-native-bsdapp-clang
 	if [ -d $DPDK_FREEBSD_DIR ] && [ $SPDK_RUN_INSTALLED_DPDK -eq 1 ]; then
@@ -178,7 +183,7 @@ if [ -d /usr/include/rbd ] &&  [ -d /usr/include/rados ] && [ $SPDK_TEST_RBD -eq
 fi
 
 if [ $SPDK_TEST_VPP -eq 1 ]; then
-	VPP_PATH="/usr/local/src/vpp/build-root/install-vpp_debug-native/vpp/"
+	VPP_PATH="/usr/local/src/vpp-19.04/build-root/install-vpp_debug-native/vpp/"
 	export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${VPP_PATH}/lib/
 	export PATH=${PATH}:${VPP_PATH}/bin/
 	config_params+=" --with-vpp=${VPP_PATH}"
@@ -212,7 +217,7 @@ fi
 # By default, --with-dpdk is not set meaning the SPDK build will use the DPDK submodule.
 # If a DPDK installation is found in a well-known location though, WITH_DPDK_DIR will be
 # set which will override the default and use that DPDK installation instead.
-if [ ! -z "$WITH_DPDK_DIR" ]; then
+if [ -n "$WITH_DPDK_DIR" ]; then
 	config_params+=" --with-dpdk=$WITH_DPDK_DIR"
 fi
 
@@ -305,7 +310,7 @@ function process_core() {
 			exe=$(eu-readelf -n "$core" | grep -oP -m1 "$exe.+")
 		fi
 		echo "exe for $core is $exe"
-		if [[ ! -z "$exe" ]]; then
+		if [[ -n "$exe" ]]; then
 			if hash gdb &>/dev/null; then
 				gdb -batch -ex "thread apply all bt full" $exe $core
 			fi
@@ -415,11 +420,15 @@ function waitforbdev() {
 	local i
 
 	for ((i=1; i<=20; i++)); do
-		if ! $rpc_py get_bdevs | jq -r '.[] .name' | grep -qw $bdev_name; then
-			sleep 0.1
-		else
+		if $rpc_py bdev_get_bdevs | jq -r '.[] .name' | grep -qw $bdev_name; then
 			return 0
 		fi
+
+		if $rpc_py bdev_get_bdevs | jq -r '.[] .aliases' | grep -qw $bdev_name; then
+			return 0
+		fi
+
+		sleep 0.1
 	done
 
 	return 1
@@ -432,8 +441,19 @@ function killprocess() {
 	fi
 
 	if kill -0 $1; then
-		echo "killing process with pid $1"
-		kill $1
+		if [ "$(ps --no-headers -o comm= $1)" = "sudo" ]; then
+			# kill the child process, which is the actual app
+			# (assume $1 has just one child)
+			local child="$(pgrep -P $1)"
+			echo "killing process with pid $child"
+			kill $child
+		else
+			echo "killing process with pid $1"
+			kill $1
+		fi
+
+		# wait for the process regardless if its the dummy sudo one
+		# or the actual app - it should terminate anyway
 		wait $1
 	fi
 }
@@ -521,7 +541,7 @@ function kill_stub() {
 
 function run_test() {
 	xtrace_disable
-	local test_type="$(echo $1 | tr 'a-z' 'A-Z')"
+	local test_type="$(echo $1 | tr '[:lower:]' '[:upper:]')"
 	shift
 	echo "************************************"
 	echo "START TEST $test_type $@"
@@ -548,7 +568,7 @@ function print_backtrace() {
 		local src="${BASH_SOURCE[$i]}"
 		echo "in $src:$line_nr -> $func()"
 		echo "     ..."
-		nl -w 4 -ba -nln $src | grep -B 5 -A 5 "^$line_nr[^0-9]" | \
+		nl -w 4 -ba -nln $src | grep -B 5 -A 5 "^${line_nr}[^0-9]" | \
 			sed "s/^/   /g" | sed "s/^   $line_nr /=> $line_nr /g"
 		echo "     ..."
 	done
@@ -584,7 +604,7 @@ function part_dev_by_gpt () {
 		echo "Process nbd pid: $nbd_pid"
 		waitforlisten $nbd_pid $rpc_server
 
-		# Start bdev as a nbd device
+		# Start bdev as an nbd device
 		nbd_start_disks "$rpc_server" $devname $nbd_path
 
 		waitfornbd ${nbd_path:5}
@@ -593,7 +613,7 @@ function part_dev_by_gpt () {
 			parted -s $nbd_path mklabel gpt mkpart first '0%' '50%' mkpart second '50%' '100%'
 
 			# change the GUID to SPDK GUID value
-			SPDK_GPT_GUID=$(grep SPDK_GPT_PART_TYPE_GUID $rootdir/lib/bdev/gpt/gpt.h \
+			SPDK_GPT_GUID=$(grep SPDK_GPT_PART_TYPE_GUID $rootdir/module/bdev/gpt/gpt.h \
 				| awk -F "(" '{ print $2}' | sed 's/)//g' \
 				| awk -F ", " '{ print $1 "-" $2 "-" $3 "-" $4 "-" $5}' | sed 's/0x//g')
 			sgdisk -t 1:$SPDK_GPT_GUID $nbd_path
@@ -634,9 +654,9 @@ function discover_bdevs()
 
 	# Get all of the bdevs
 	if [ -z "$rpc_server" ]; then
-		$rootdir/scripts/rpc.py get_bdevs
+		$rootdir/scripts/rpc.py bdev_get_bdevs
 	else
-		$rootdir/scripts/rpc.py -s "$rpc_server" get_bdevs
+		$rootdir/scripts/rpc.py -s "$rpc_server" bdev_get_bdevs
 	fi
 
 	# Shut down the bdev service
@@ -650,7 +670,7 @@ function waitforblk()
 	local i=0
 	while ! lsblk -l -o NAME | grep -q -w $1; do
 		[ $i -lt 15 ] || break
-		i=$[$i+1]
+		i=$((i+1))
 		sleep 1
 	done
 
@@ -666,7 +686,7 @@ function waitforblk_disconnect()
 	local i=0
 	while lsblk -l -o NAME | grep -q -w $1; do
 		[ $i -lt 15 ] || break
-		i=$[$i+1]
+		i=$((i+1))
 		sleep 1
 	done
 
@@ -682,7 +702,7 @@ function waitforfile()
 	local i=0
 	while [ ! -e $1 ]; do
 		[ $i -lt 200 ] || break
-		i=$[$i+1]
+		i=$((i+1))
 		sleep 0.1
 	done
 
@@ -722,6 +742,7 @@ EOL
 
 	if [ "$workload" == "verify" ]; then
 		echo "verify=sha1" >> $config_file
+		echo "verify_backlog=1024" >> $config_file
 		echo "rw=randwrite" >> $config_file
 	elif [ "$workload" == "trim" ]; then
 		echo "rw=trimwrite" >> $config_file
@@ -758,7 +779,7 @@ function fio_bdev()
 	# Preload AddressSanitizer library to fio if fio_plugin was compiled with it
 	local asan_lib=$(ldd $bdev_plugin | grep libasan | awk '{print $3}')
 
-	LD_PRELOAD=""$asan_lib" "$bdev_plugin"" "$fio_dir"/fio "$@"
+	LD_PRELOAD="$asan_lib $bdev_plugin" "$fio_dir"/fio "$@"
 }
 
 function fio_nvme()
@@ -770,13 +791,13 @@ function fio_nvme()
 	# Preload AddressSanitizer library to fio if fio_plugin was compiled with it
 	asan_lib=$(ldd $nvme_plugin | grep libasan | awk '{print $3}')
 
-	LD_PRELOAD=""$asan_lib" "$nvme_plugin"" "$fio_dir"/fio "$@"
+	LD_PRELOAD="$asan_lib $nvme_plugin" "$fio_dir"/fio "$@"
 }
 
 function get_lvs_free_mb()
 {
 	local lvs_uuid=$1
-	local lvs_info=$($rpc_py get_lvol_stores)
+	local lvs_info=$($rpc_py bdev_lvol_get_lvstores)
 	local fc=$(jq ".[] | select(.uuid==\"$lvs_uuid\") .free_clusters" <<< "$lvs_info")
 	local cs=$(jq ".[] | select(.uuid==\"$lvs_uuid\") .cluster_size" <<< "$lvs_info")
 
@@ -788,7 +809,7 @@ function get_lvs_free_mb()
 function get_bdev_size()
 {
 	local bdev_name=$1
-	local bdev_info=$($rpc_py get_bdevs -b $bdev_name)
+	local bdev_info=$($rpc_py bdev_get_bdevs -b $bdev_name)
 	local bs=$(jq ".[] .block_size" <<< "$bdev_info")
 	local nb=$(jq ".[] .num_blocks" <<< "$bdev_info")
 
@@ -815,7 +836,7 @@ function freebsd_update_contigmem_mod()
 {
 	if [ $(uname) = FreeBSD ]; then
 		kldunload contigmem.ko || true
-		if [ ! -z "$WITH_DPDK_DIR" ]; then
+		if [ -n "$WITH_DPDK_DIR" ]; then
 			echo "Warning: SPDK only works on FreeBSD with patches that only exist in SPDK's dpdk submodule"
 			cp -f "$WITH_DPDK_DIR/kmod/contigmem.ko" /boot/modules/
 			cp -f "$WITH_DPDK_DIR/kmod/contigmem.ko" /boot/kernel/
@@ -824,6 +845,27 @@ function freebsd_update_contigmem_mod()
 			cp -f "$rootdir/dpdk/build/kmod/contigmem.ko" /boot/kernel/
 		fi
 	fi
+}
+
+function get_nvme_name_from_bdf {
+	blkname=()
+
+	nvme_devs=$(lsblk -d --output NAME | grep "^nvme") || true
+	if [ -z "$nvme_devs" ]; then
+		return
+	fi
+	for dev in $nvme_devs; do
+		link_name=$(readlink /sys/block/$dev/device/device) || true
+		if [ -z "$link_name" ]; then
+			link_name=$(readlink /sys/block/$dev/device)
+		fi
+		bdf=$(basename "$link_name")
+		if [ "$bdf" = "$1" ]; then
+			blkname+=($dev)
+		fi
+	done
+
+	printf '%s\n' "${blkname[@]}"
 }
 
 set -o errtrace

@@ -80,19 +80,24 @@ struct spdk_iscsi_conn {
 	 */
 	struct spdk_iscsi_portal	*portal;
 	int				pg_tag;
-	char				*portal_host;
-	char				*portal_port;
-	struct spdk_cpuset		*portal_cpumask;
-	uint32_t			lcore;
+	char				portal_host[MAX_PORTAL_ADDR + 1];
+	char				portal_port[MAX_PORTAL_ADDR + 1];
+	struct spdk_iscsi_poll_group	*pg;
 	struct spdk_sock		*sock;
 	struct spdk_iscsi_sess		*sess;
 
 	enum iscsi_connection_state	state;
 	int				login_phase;
+	bool				is_logged_out;
 
 	uint64_t	last_flush;
 	uint64_t	last_fill;
 	uint64_t	last_nopin;
+
+	/* Timer used to destroy connection after requesting logout if
+	 *  initiator does not send logout request.
+	 */
+	struct spdk_poller *logout_request_timer;
 
 	/* Timer used to destroy connection after logout if initiator does
 	 *  not close the connection.
@@ -135,8 +140,10 @@ struct spdk_iscsi_conn {
 	bool conn_param_state_negotiated[MAX_CONNECTION_PARAMS];
 	struct iscsi_chap_auth auth;
 	bool authenticated;
+	bool disable_chap;
 	bool require_chap;
 	bool mutual_chap;
+	int32_t chap_group;
 	uint32_t pending_task_cnt;
 	uint32_t data_out_cnt;
 	uint32_t data_in_cnt;
@@ -172,7 +179,7 @@ extern struct spdk_iscsi_conn *g_conns_array;
 
 int spdk_initialize_iscsi_conns(void);
 void spdk_shutdown_iscsi_conns(void);
-void spdk_iscsi_conns_start_exit(struct spdk_iscsi_tgt_node *target);
+void spdk_iscsi_conns_request_logout(struct spdk_iscsi_tgt_node *target);
 int spdk_iscsi_get_active_conns(struct spdk_iscsi_tgt_node *target);
 
 int spdk_iscsi_conn_construct(struct spdk_iscsi_portal *portal, struct spdk_sock *sock);
@@ -190,4 +197,5 @@ void spdk_iscsi_conn_write_pdu(struct spdk_iscsi_conn *conn, struct spdk_iscsi_p
 
 void spdk_iscsi_conn_free_pdu(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *pdu);
 
+void spdk_iscsi_conn_info_json(struct spdk_json_write_ctx *w, struct spdk_iscsi_conn *conn);
 #endif /* SPDK_ISCSI_CONN_H */

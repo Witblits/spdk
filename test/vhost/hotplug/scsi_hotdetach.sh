@@ -24,7 +24,7 @@ function prepare_fio_cmd_tc1_iter1() {
     run_fio="$fio_bin --eta=never "
     for vm_num in $1; do
         cp $fio_job $tmp_detach_job
-        vm_dir=$VM_BASE_DIR/$vm_num
+        vm_dir=$VM_DIR/$vm_num
         vm_check_scsi_location $vm_num
         for disk in $SCSI_DISK; do
             echo "[nvme-host$disk]" >> $tmp_detach_job
@@ -41,7 +41,7 @@ function prepare_fio_cmd_tc1_iter2() {
 
     for vm_num in 2; do
         cp $fio_job $tmp_detach_job
-        vm_dir=$VM_BASE_DIR/$vm_num
+        vm_dir=$VM_DIR/$vm_num
         vm_check_scsi_location $vm_num
         for disk in $SCSI_DISK; do
             echo "[nvme-host$disk]" >> $tmp_detach_job
@@ -66,7 +66,7 @@ function prepare_fio_cmd_tc2_iter1() {
     run_fio="$fio_bin --eta=never "
     for vm_num in $1; do
         cp $fio_job $tmp_detach_job
-        vm_dir=$VM_BASE_DIR/$vm_num
+        vm_dir=$VM_DIR/$vm_num
         vm_check_scsi_location $vm_num
         disk_array=($SCSI_DISK)
         disk=${disk_array[0]}
@@ -89,7 +89,7 @@ function prepare_fio_cmd_tc2_iter2() {
         else
             vm_job_name=default_integrity_4discs.job
         fi
-        vm_dir=$VM_BASE_DIR/$vm_num
+        vm_dir=$VM_DIR/$vm_num
         vm_check_scsi_location $vm_num
         for disk in $SCSI_DISK; do
             echo "[nvme-host$disk]" >> $tmp_detach_job
@@ -113,7 +113,7 @@ function prepare_fio_cmd_tc3_iter1() {
         else
             vm_job_name=default_integrity_4discs.job
         fi
-        vm_dir=$VM_BASE_DIR/$vm_num
+        vm_dir=$VM_DIR/$vm_num
         vm_check_scsi_location $vm_num
         j=1
         for disk in $SCSI_DISK; do
@@ -143,7 +143,7 @@ function hotdetach_tc1() {
     $run_fio &
     last_pid=$!
     sleep 3
-    $rpc_py remove_vhost_scsi_target naa.Nvme0n1p4.2 0
+    $rpc_py vhost_scsi_controller_remove_target naa.Nvme0n1p4.2 0
     set +xe
     wait $last_pid
     check_fio_retcode "Hotdetach test case 1: Iteration 1." 1 $?
@@ -165,7 +165,7 @@ function hotdetach_tc2() {
     $run_fio &
     last_pid=$!
     sleep 3
-    $rpc_py remove_vhost_scsi_target naa.Nvme0n1p4.2 0
+    $rpc_py vhost_scsi_controller_remove_target naa.Nvme0n1p4.2 0
     set +xe
     wait $last_pid
     check_fio_retcode "Hotdetach test case 2: Iteration 1." 1 $?
@@ -187,7 +187,7 @@ function hotdetach_tc3() {
     $run_fio &
     last_pid=$!
     sleep 3
-    $rpc_py remove_vhost_scsi_target naa.Nvme0n1p4.2 0
+    $rpc_py vhost_scsi_controller_remove_target naa.Nvme0n1p4.2 0
     wait $last_pid
     check_fio_retcode "Hotdetach test case 3: Iteration 1." 0 $?
     second_disk=""
@@ -212,7 +212,7 @@ function hotdetach_tc4() {
     $run_fio &
     second_fio_pid=$!
     sleep 3
-    $rpc_py remove_vhost_scsi_target naa.Nvme0n1p4.2 0
+    $rpc_py vhost_scsi_controller_remove_target naa.Nvme0n1p4.2 0
     set +xe
     wait $first_fio_pid
     check_fio_retcode "Hotdetach test case 4: Iteration 1." 1 $?
@@ -232,7 +232,7 @@ function hotdetach_tc4() {
 }
 
 function clear_after_tests() {
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p4.2 0 Nvme0n1p8
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p4.2 0 Nvme0n1p8
 }
 
 hotdetach_tc1

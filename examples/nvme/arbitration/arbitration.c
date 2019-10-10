@@ -110,7 +110,7 @@ static struct ctrlr_entry *g_controllers	= NULL;
 static struct ns_entry *g_namespaces		= NULL;
 static struct worker_thread *g_workers		= NULL;
 
-static struct feature features[256];
+static struct feature features[SPDK_NVME_FEAT_ARBITRATION + 1] = {};
 
 static struct arb_context g_arbitration = {
 	.shm_id					= -1,
@@ -253,6 +253,7 @@ register_ctrlr(struct spdk_nvme_ctrlr *ctrlr)
 	int nsid, num_ns;
 	struct spdk_nvme_ns *ns;
 	struct ctrlr_entry *entry = calloc(1, sizeof(struct ctrlr_entry));
+	union spdk_nvme_cap_register cap = spdk_nvme_ctrlr_get_regs_cap(ctrlr);
 	const struct spdk_nvme_ctrlr_data *cdata = spdk_nvme_ctrlr_get_data(ctrlr);
 
 	if (entry == NULL) {
@@ -280,7 +281,8 @@ register_ctrlr(struct spdk_nvme_ctrlr *ctrlr)
 		register_ns(ctrlr, ns);
 	}
 
-	if (g_arbitration.arbitration_mechanism == SPDK_NVME_CAP_AMS_WRR) {
+	if (g_arbitration.arbitration_mechanism == SPDK_NVME_CAP_AMS_WRR &&
+	    (cap.bits.ams & SPDK_NVME_CAP_AMS_WRR)) {
 		get_arb_feature(ctrlr);
 
 		if (g_arbitration.arbitration_config != 0) {
@@ -994,11 +996,14 @@ static int
 get_feature(struct spdk_nvme_ctrlr *ctrlr, uint8_t fid)
 {
 	struct spdk_nvme_cmd cmd = {};
+	struct feature *feature = &features[fid];
+
+	feature->valid = false;
 
 	cmd.opc = SPDK_NVME_OPC_GET_FEATURES;
 	cmd.cdw10 = fid;
 
-	return spdk_nvme_ctrlr_cmd_admin_raw(ctrlr, &cmd, NULL, 0, get_feature_completion, &features[fid]);
+	return spdk_nvme_ctrlr_cmd_admin_raw(ctrlr, &cmd, NULL, 0, get_feature_completion, feature);
 }
 
 static void

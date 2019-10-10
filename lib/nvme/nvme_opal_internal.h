@@ -44,7 +44,7 @@
 #define OPAL_UID_LENGTH			8
 #define OPAL_MAX_LRS			8 /* minimum 8 defined by spec */
 
-#define SPDK_OPAL_TPER_TIMEOUT		30 /* seconds */
+#define SPDK_OPAL_TPER_TIMEOUT		600 /* seconds */
 
 #define GENERIC_HOST_SESSION_NUM	0x69
 
@@ -143,7 +143,7 @@ struct spdk_opal_locking_session {
 
 struct spdk_opal_new_pw_session {
 	struct opal_common_session old_session;
-	struct opal_common_session new_pw_session;
+	struct opal_common_session new_session;
 };
 
 const uint8_t spdk_opal_uid[][OPAL_UID_LENGTH] = {

@@ -51,8 +51,6 @@ static struct nvme_driver _g_nvme_driver = {
 };
 struct nvme_driver *g_spdk_nvme_driver = &_g_nvme_driver;
 
-int32_t spdk_nvme_retry_count = 1;
-
 struct nvme_request *g_request = NULL;
 
 extern bool ut_fail_vtophys;
@@ -155,7 +153,13 @@ spdk_pci_device_cfg_write32(struct spdk_pci_device *dev, uint32_t value, uint32_
 }
 
 int
-spdk_pci_device_claim(const struct spdk_pci_addr *pci_addr)
+spdk_pci_device_claim(struct spdk_pci_device *dev)
+{
+	abort();
+}
+
+void
+spdk_pci_device_unclaim(struct spdk_pci_device *dev)
 {
 	abort();
 }
@@ -235,13 +239,13 @@ nvme_completion_is_retry(const struct spdk_nvme_cpl *cpl)
 }
 
 void
-nvme_qpair_print_command(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cmd *cmd)
+spdk_nvme_qpair_print_command(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cmd *cmd)
 {
 	abort();
 }
 
 void
-nvme_qpair_print_completion(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cpl *cpl)
+spdk_nvme_qpair_print_completion(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cpl *cpl)
 {
 	abort();
 }
@@ -469,7 +473,6 @@ test_sgl_req(void)
 	req->cmd.opc = SPDK_NVME_OPC_WRITE;
 	req->cmd.cdw10 = 10000;
 	req->cmd.cdw12 = 7 | 0;
-	spdk_nvme_retry_count = 1;
 	fail_next_sge = true;
 
 	CU_ASSERT(nvme_qpair_submit_request(&qpair, req) != 0);

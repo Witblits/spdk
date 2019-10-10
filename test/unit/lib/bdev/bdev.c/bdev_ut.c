@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -64,7 +64,11 @@ DEFINE_STUB(spdk_notify_type_register, struct spdk_notify_type *, (const char *t
 
 int g_status;
 int g_count;
+enum spdk_bdev_event_type g_event_type1;
+enum spdk_bdev_event_type g_event_type2;
 struct spdk_histogram_data *g_histogram;
+void *g_unregister_arg;
+int g_unregister_rc;
 
 void
 spdk_scsi_nvme_translate(const struct spdk_bdev_io *bdev_io,
@@ -415,6 +419,35 @@ get_device_stat_cb(struct spdk_bdev *bdev, struct spdk_bdev_io_stat *stat, void 
 }
 
 static void
+bdev_unregister_cb(void *cb_arg, int rc)
+{
+	g_unregister_arg = cb_arg;
+	g_unregister_rc = rc;
+}
+
+static void
+bdev_open_cb1(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *event_ctx)
+{
+	struct spdk_bdev_desc *desc = *(struct spdk_bdev_desc **)event_ctx;
+
+	g_event_type1 = type;
+	if (SPDK_BDEV_EVENT_REMOVE == type) {
+		spdk_bdev_close(desc);
+	}
+}
+
+static void
+bdev_open_cb2(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *event_ctx)
+{
+	struct spdk_bdev_desc *desc = *(struct spdk_bdev_desc **)event_ctx;
+
+	g_event_type2 = type;
+	if (SPDK_BDEV_EVENT_REMOVE == type) {
+		spdk_bdev_close(desc);
+	}
+}
+
+static void
 get_device_stat_test(void)
 {
 	struct spdk_bdev *bdev;
@@ -606,6 +639,7 @@ num_blocks_test(void)
 {
 	struct spdk_bdev bdev;
 	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_bdev_desc *desc_ext = NULL;
 	int rc;
 
 	memset(&bdev, 0, sizeof(bdev));
@@ -630,10 +664,30 @@ num_blocks_test(void)
 	/* Shrinking block number */
 	CU_ASSERT(spdk_bdev_notify_blockcnt_change(&bdev, 20) != 0);
 
+	/* In case bdev opened with ext API */
+	rc = spdk_bdev_open_ext("num_blocks", false, bdev_open_cb1, &desc_ext, &desc_ext);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(desc_ext != NULL);
+
+	g_event_type1 = 0xFF;
+	/* Growing block number */
+	CU_ASSERT(spdk_bdev_notify_blockcnt_change(&bdev, 90) == 0);
+
+	poll_threads();
+	CU_ASSERT_EQUAL(g_event_type1, SPDK_BDEV_EVENT_RESIZE);
+
+	g_event_type1 = 0xFF;
+	/* Growing block number and closing */
+	CU_ASSERT(spdk_bdev_notify_blockcnt_change(&bdev, 100) == 0);
+
 	spdk_bdev_close(desc);
+	spdk_bdev_close(desc_ext);
 	spdk_bdev_unregister(&bdev, NULL, NULL);
 
 	poll_threads();
+
+	/* Callback is not called for closed device */
+	CU_ASSERT_EQUAL(g_event_type1, 0xFF);
 }
 
 static void
@@ -1277,7 +1331,7 @@ static void
 bdev_io_split_with_io_wait(void)
 {
 	struct spdk_bdev *bdev;
-	struct spdk_bdev_desc *desc;
+	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
 	struct spdk_bdev_channel *channel;
 	struct spdk_bdev_mgmt_channel *mgmt_ch;
@@ -1412,7 +1466,7 @@ static void
 bdev_io_alignment(void)
 {
 	struct spdk_bdev *bdev;
-	struct spdk_bdev_desc *desc;
+	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
 	struct spdk_bdev_opts bdev_opts = {
 		.bdev_io_pool_size = 20,
@@ -1630,7 +1684,7 @@ static void
 bdev_io_alignment_with_boundary(void)
 {
 	struct spdk_bdev *bdev;
-	struct spdk_bdev_desc *desc;
+	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
 	struct spdk_bdev_opts bdev_opts = {
 		.bdev_io_pool_size = 20,
@@ -1863,7 +1917,7 @@ bdev_histograms(void)
 	poll_threads();
 	CU_ASSERT(g_status == -EFAULT);
 
-	spdk_histogram_data_free(g_histogram);
+	spdk_histogram_data_free(histogram);
 	spdk_put_io_channel(ch);
 	spdk_bdev_close(desc);
 	free_bdev(bdev);
@@ -1975,6 +2029,98 @@ bdev_write_zeroes(void)
 	poll_threads();
 }
 
+static void
+bdev_open_while_hotremove(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc[2] = {};
+	int rc;
+
+	bdev = allocate_bdev("bdev");
+
+	rc = spdk_bdev_open(bdev, false, NULL, NULL, &desc[0]);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(desc[0] != NULL);
+
+	spdk_bdev_unregister(bdev, NULL, NULL);
+
+	rc = spdk_bdev_open(bdev, false, NULL, NULL, &desc[1]);
+	CU_ASSERT(rc == -ENODEV);
+	SPDK_CU_ASSERT_FATAL(desc[1] == NULL);
+
+	spdk_bdev_close(desc[0]);
+	free_bdev(bdev);
+}
+
+static void
+bdev_close_while_hotremove(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	int rc = 0;
+
+	bdev = allocate_bdev("bdev");
+
+	rc = spdk_bdev_open_ext("bdev", true, bdev_open_cb1, &desc, &desc);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	/* Simulate hot-unplug by unregistering bdev */
+	g_event_type1 = 0xFF;
+	g_unregister_arg = NULL;
+	g_unregister_rc = -1;
+	spdk_bdev_unregister(bdev, bdev_unregister_cb, (void *)0x12345678);
+	/* Close device while remove event is in flight */
+	spdk_bdev_close(desc);
+
+	/* Ensure that unregister callback is delayed */
+	CU_ASSERT_EQUAL(g_unregister_arg, NULL);
+	CU_ASSERT_EQUAL(g_unregister_rc, -1);
+
+	poll_threads();
+
+	/* Event callback shall not be issued because device was closed */
+	CU_ASSERT_EQUAL(g_event_type1, 0xFF);
+	/* Unregister callback is issued */
+	CU_ASSERT_EQUAL(g_unregister_arg, (void *)0x12345678);
+	CU_ASSERT_EQUAL(g_unregister_rc, 0);
+
+	free_bdev(bdev);
+}
+
+static void
+bdev_open_ext(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc1 = NULL;
+	struct spdk_bdev_desc *desc2 = NULL;
+	int rc = 0;
+
+	bdev = allocate_bdev("bdev");
+
+	rc = spdk_bdev_open_ext("bdev", true, NULL, NULL, &desc1);
+	CU_ASSERT_EQUAL(rc, -EINVAL);
+
+	rc = spdk_bdev_open_ext("bdev", true, bdev_open_cb1, &desc1, &desc1);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	rc = spdk_bdev_open_ext("bdev", true, bdev_open_cb2, &desc2, &desc2);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	g_event_type1 = 0xFF;
+	g_event_type2 = 0xFF;
+
+	/* Simulate hot-unplug by unregistering bdev */
+	spdk_bdev_unregister(bdev, NULL, NULL);
+	poll_threads();
+
+	/* Check if correct events have been triggered in event callback fn */
+	CU_ASSERT_EQUAL(g_event_type1, SPDK_BDEV_EVENT_REMOVE);
+	CU_ASSERT_EQUAL(g_event_type2, SPDK_BDEV_EVENT_REMOVE);
+
+	free_bdev(bdev);
+	poll_threads();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2006,7 +2152,10 @@ main(int argc, char **argv)
 		CU_add_test(suite, "bdev_io_alignment_with_boundary", bdev_io_alignment_with_boundary) == NULL ||
 		CU_add_test(suite, "bdev_io_alignment", bdev_io_alignment) == NULL ||
 		CU_add_test(suite, "bdev_histograms", bdev_histograms) == NULL ||
-		CU_add_test(suite, "bdev_write_zeroes", bdev_write_zeroes) == NULL
+		CU_add_test(suite, "bdev_write_zeroes", bdev_write_zeroes) == NULL ||
+		CU_add_test(suite, "bdev_open_while_hotremove", bdev_open_while_hotremove) == NULL ||
+		CU_add_test(suite, "bdev_close_while_hotremove", bdev_close_while_hotremove) == NULL ||
+		CU_add_test(suite, "bdev_open_ext", bdev_open_ext) == NULL
 	) {
 		CU_cleanup_registry();
 		return CU_get_error();

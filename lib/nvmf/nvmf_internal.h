@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -47,6 +47,9 @@
 
 #define SPDK_NVMF_MAX_SGL_ENTRIES	16
 
+/* The maximum number of buffers per request */
+#define NVMF_REQ_MAX_BUFFERS	(SPDK_NVMF_MAX_SGL_ENTRIES * 2)
+
 /* AIO backend requires block size aligned data buffers,
  * extra 4KiB aligned data buffer should work for most devices.
  */
@@ -74,6 +77,8 @@ enum spdk_nvmf_qpair_state {
 typedef void (*spdk_nvmf_state_change_done)(void *cb_arg, int status);
 
 struct spdk_nvmf_tgt {
+	char					name[NVMF_TGT_NAME_MAX_LENGTH];
+
 	uint64_t				discovery_genctr;
 
 	uint32_t				max_subsystems;
@@ -81,12 +86,12 @@ struct spdk_nvmf_tgt {
 	/* Array of subsystem pointers of size max_subsystems indexed by sid */
 	struct spdk_nvmf_subsystem		**subsystems;
 
-	struct spdk_nvmf_discovery_log_page	*discovery_log_page;
-	size_t					discovery_log_page_size;
 	TAILQ_HEAD(, spdk_nvmf_transport)	transports;
 
 	spdk_nvmf_tgt_destroy_done_fn		*destroy_cb_fn;
 	void					*destroy_cb_arg;
+
+	TAILQ_ENTRY(spdk_nvmf_tgt)		link;
 };
 
 struct spdk_nvmf_host {
@@ -106,6 +111,8 @@ struct spdk_nvmf_transport_pg_cache_buf {
 
 struct spdk_nvmf_transport_poll_group {
 	struct spdk_nvmf_transport					*transport;
+	/* Requests that are waiting to obtain a data buffer */
+	STAILQ_HEAD(, spdk_nvmf_request)				pending_buf_queue;
 	STAILQ_HEAD(, spdk_nvmf_transport_pg_cache_buf)			buf_cache;
 	uint32_t							buf_cache_count;
 	uint32_t							buf_cache_size;
@@ -142,6 +149,7 @@ struct spdk_nvmf_subsystem_pg_ns_info {
 	struct spdk_uuid		holder_id;
 	/* Host ID for the registrants with the namespace */
 	struct spdk_uuid		reg_hostid[SPDK_NVMF_MAX_NUM_REGISTRANTS];
+	uint64_t			num_blocks;
 };
 
 typedef void(*spdk_nvmf_poll_group_mod_done)(void *cb_arg, int status);
@@ -172,6 +180,9 @@ struct spdk_nvmf_poll_group {
 
 	/* All of the queue pairs that belong to this poll group */
 	TAILQ_HEAD(, spdk_nvmf_qpair)			qpairs;
+
+	/* Statistics */
+	struct spdk_nvmf_poll_group_stat		stat;
 };
 
 typedef enum _spdk_nvmf_request_exec_status {
@@ -202,10 +213,13 @@ struct spdk_nvmf_request {
 	void				*data;
 	union nvmf_h2c_msg		*cmd;
 	union nvmf_c2h_msg		*rsp;
-	struct iovec			iov[SPDK_NVMF_MAX_SGL_ENTRIES * 2];
+	void				*buffers[NVMF_REQ_MAX_BUFFERS];
+	struct iovec			iov[NVMF_REQ_MAX_BUFFERS];
 	uint32_t			iovcnt;
+	bool				data_from_pool;
 	struct spdk_bdev_io_wait_entry	bdev_io_wait;
 
+	STAILQ_ENTRY(spdk_nvmf_request)	buf_link;
 	TAILQ_ENTRY(spdk_nvmf_request)	link;
 };
 
@@ -283,6 +297,7 @@ struct spdk_nvmf_reservation_log {
  */
 struct spdk_nvmf_ctrlr {
 	uint16_t			cntlid;
+	char				hostnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 	struct spdk_nvmf_subsystem	*subsys;
 
 	struct {
@@ -369,9 +384,22 @@ void spdk_nvmf_request_exec(struct spdk_nvmf_request *req);
 int spdk_nvmf_request_free(struct spdk_nvmf_request *req);
 int spdk_nvmf_request_complete(struct spdk_nvmf_request *req);
 
+void spdk_nvmf_request_free_buffers(struct spdk_nvmf_request *req,
+				    struct spdk_nvmf_transport_poll_group *group,
+				    struct spdk_nvmf_transport *transport);
+int spdk_nvmf_request_get_buffers(struct spdk_nvmf_request *req,
+				  struct spdk_nvmf_transport_poll_group *group,
+				  struct spdk_nvmf_transport *transport,
+				  uint32_t length);
+int spdk_nvmf_request_get_buffers_multi(struct spdk_nvmf_request *req,
+					struct spdk_nvmf_transport_poll_group *group,
+					struct spdk_nvmf_transport *transport,
+					uint32_t *lengths, uint32_t num_lengths);
+
 bool spdk_nvmf_request_get_dif_ctx(struct spdk_nvmf_request *req, struct spdk_dif_ctx *dif_ctx);
 
-void spdk_nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, struct iovec *iov,
+void spdk_nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn,
+				      struct iovec *iov,
 				      uint32_t iovcnt, uint64_t offset, uint32_t length);
 
 void spdk_nvmf_ctrlr_destruct(struct spdk_nvmf_ctrlr *ctrlr);

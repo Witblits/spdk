@@ -3,16 +3,16 @@ spdk_clear_config_py="$rootdir/test/json_config/clear_config.py"
 
 function on_error_exit() {
 	set +e
-	if [ ! -z $spdk_tgt_pid ]; then
+	if [ -n "$spdk_tgt_pid" ]; then
 		killprocess $spdk_tgt_pid
 	fi
-	if [ ! -z $nvmf_tgt_pid ]; then
+	if [ -n "$nvmf_tgt_pid" ]; then
 		killprocess $nvmf_tgt_pid
 	fi
-	if [ ! -z $iscsi_tgt_pid ]; then
+	if [ -n "$iscsi_tgt_pid" ]; then
 		killprocess $iscsi_tgt_pid
 	fi
-	if [ ! -z $vhost_tgt_pid ]; then
+	if [ -n "$vhost_tgt_pid" ]; then
 		killprocess $vhost_tgt_pid
 	fi
 	rm -f $testdir/${MATCH_FILE} $testdir/match_files/spdkcli_details_vhost.test /tmp/sample_aio /tmp/sample_pmem
@@ -32,12 +32,6 @@ function run_nvmf_tgt() {
 	waitforlisten $nvmf_tgt_pid
 }
 
-function run_iscsi_tgt() {
-	$rootdir/app/iscsi_tgt/iscsi_tgt -m 0x3 -p 0 -s 4096 &
-	iscsi_tgt_pid=$!
-	waitforlisten $iscsi_tgt_pid
-}
-
 function run_vhost_tgt() {
 	$rootdir/app/vhost/vhost -m 0x3 -p 0 -s 4096 &
 	vhost_tgt_pid=$!
@@ -46,6 +40,6 @@ function run_vhost_tgt() {
 
 function check_match() {
 	$rootdir/scripts/spdkcli.py ll $SPDKCLI_BRANCH > $testdir/match_files/${MATCH_FILE}
-	$rootdir/test/app/match/match -v $testdir/match_files/${MATCH_FILE}.match
+	$rootdir/test/app/match/match $testdir/match_files/${MATCH_FILE}.match
 	rm -f $testdir/match_files/${MATCH_FILE}
 }

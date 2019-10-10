@@ -405,6 +405,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("Initialization complete.\n");
+	printf("Andreas says hi\n");
 	hello_world();
 	cleanup();
 	return 0;
